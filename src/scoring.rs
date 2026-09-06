@@ -30,6 +30,30 @@ pub struct Profile {
 }
 fn default_income() -> f64 { 2.5 }
 
+impl Profile {
+    /// Reject out-of-range / nonsensical inputs so scoring can't emit NaN/inf or absurd year counts.
+    pub fn validate(&self) -> Result<(), String> {
+        let rng = |name: &str, v: f64, lo: f64, hi: f64| -> Result<(), String> {
+            if v.is_finite() && (lo..=hi).contains(&v) { Ok(()) }
+            else { Err(format!("{name} must be between {lo} and {hi}")) }
+        };
+        rng("age", self.age, 18.0, 110.0)?;
+        if self.sex != "M" && self.sex != "F" {
+            return Err("sex must be \"M\" or \"F\"".into());
+        }
+        if !(self.smoke <= 2) {
+            return Err("smoke must be 0 (never), 1 (former), or 2 (current)".into());
+        }
+        rng("pa_min", self.pa_min, 0.0, 10_000.0)?;
+        if !(self.sleep.is_finite() && self.sleep > 0.0 && self.sleep <= 24.0) {
+            return Err("sleep must be between 0 and 24 hours".into());
+        }
+        rng("waist", self.waist, 40.0, 250.0)?;
+        rng("income", self.income, 0.0, 20.0)?;
+        Ok(())
+    }
+}
+
 #[derive(Serialize)]
 pub struct Estimate {
     pub estimate_years: f64,
@@ -106,15 +130,19 @@ pub fn remaining_le(qx: &HashMap<String, f64>, start_age: i64, rr: f64) -> f64 {
     le
 }
 
-pub fn estimate(bundle: &Bundle, p: &Profile) -> Result<Estimate, String> {
-    let base: &Baseline = bundle.baselines.get(&p.country)
+/// Precise relative risk for a profile, plus the resolved country baseline.
+fn risk<'a>(bundle: &'a Bundle, p: &Profile) -> Result<(f64, &'a Baseline), String> {
+    let base = bundle.baselines.get(&p.country)
         .ok_or_else(|| format!("no baseline for country {}", p.country))?;
-    let qx = base.qx.get(&p.sex).ok_or_else(|| format!("no qx for sex {}", p.sex))?;
-
-    let d = design(p, &bundle.coefficients);
-    let lp = linear_predictor(&d, &bundle.coefficients.prediction);
+    let lp = linear_predictor(&design(p, &bundle.coefficients), &bundle.coefficients.prediction);
     let reference = if p.age < bundle.coefficients.young_cutoff { base.reference_lp.young } else { base.reference_lp.old };
-    let rr = (lp - reference).exp();
+    Ok(((lp - reference).exp(), base))
+}
+
+pub fn estimate(bundle: &Bundle, p: &Profile) -> Result<Estimate, String> {
+    p.validate()?;
+    let (rr, base) = risk(bundle, p)?;
+    let qx = base.qx.get(&p.sex).ok_or_else(|| format!("no qx for sex {}", p.sex))?;
 
     let years = remaining_le(qx, p.age.round() as i64, rr);
     let rel = if p.age >= 55.0 { 0.06 } else { 0.10 }; // interval widens for the young (sparse deaths) — heuristic v1
@@ -128,6 +156,74 @@ pub fn estimate(bundle: &Bundle, p: &Profile) -> Result<Estimate, String> {
 }
 
 fn round1(x: f64) -> f64 { (x * 10.0).round() / 10.0 }
+
+/// A lifestyle change to explore. Only modifiable levers may change (manage/context/baseline are fixed).
+#[derive(Deserialize)]
+pub struct WhatIfChanges {
+    pub smoke: Option<u8>,
+    pub pa_min: Option<f64>,
+    pub sleep: Option<f64>,
+    pub waist: Option<f64>,
+}
+
+#[derive(Serialize)]
+pub struct WhatIf {
+    pub current_years: f64,
+    pub scenario_years: f64,
+    pub delta_years: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// Non-persisted overlay: apply lever changes and report the change in remaining years.
+/// The delta uses the TOTAL-EFFECT attribution model (not prediction), so waist/smoking read honestly.
+pub fn whatif(bundle: &Bundle, base: &Profile, changes: &WhatIfChanges) -> Result<WhatIf, String> {
+    base.validate()?;
+    let (base_rr, baseline) = risk(bundle, base)?;
+    let qx = baseline.qx.get(&base.sex).ok_or_else(|| format!("no qx for sex {}", base.sex))?;
+    let age = base.age.round() as i64;
+    let current_years = remaining_le(qx, age, base_rr);
+
+    let mut modified = base.clone();
+    let mut note = None;
+    if let Some(v) = changes.smoke {
+        // Quitting: the cohort's former-smoker coefficient reflects reverse causation ("sick-quitter"),
+        // so it must NOT drive the causal What-If. Model reducing smoking as trending toward never-smoker
+        // risk (the causal target); the real benefit accrues over ~10 years (cessation detail is a
+        // deferred model refinement, RES-02). Increasing smoking is taken at face value.
+        if v < base.smoke {
+            modified.smoke = 0;
+            note = Some("smoking-cessation benefit accrues over ~10 years; shown as the long-run effect".into());
+        } else {
+            modified.smoke = v;
+        }
+    }
+    if let Some(v) = changes.pa_min { modified.pa_min = v; }
+    if let Some(v) = changes.sleep { modified.sleep = v; }
+    if let Some(v) = changes.waist { modified.waist = v; }
+    modified.validate().map_err(|e| format!("change produces invalid profile: {e}"))?;
+
+    // Delta uses the total-effect attribution MAIN effects only. The age-interaction terms
+    // (*_x_young) are mis-specified (EXP-01) and corrupt marginal What-If deltas, so they are excluded
+    // here; age still enters the base estimate via the life table. (Age-stratified coefficients are the
+    // proper fix, deferred to model v2.1.)
+    let attr = &bundle.coefficients.attribution;
+    let d0 = design(base, &bundle.coefficients);
+    let d1 = design(&modified, &bundle.coefficients);
+    let d_lp: f64 = attr.iter()
+        .filter(|(k, _)| !k.ends_with("_x_young"))
+        .map(|(k, c)| c * (d1.get(k).copied().unwrap_or(0.0) - d0.get(k).copied().unwrap_or(0.0)))
+        .sum();
+    let scenario_rr = base_rr * d_lp.exp();
+    let scenario_years = remaining_le(qx, age, scenario_rr);
+
+    Ok(WhatIf {
+        current_years: round1(current_years),
+        scenario_years: round1(scenario_years),
+        delta_years: round1(scenario_years - current_years),
+        note,
+    })
+}
 
 #[cfg(test)]
 mod tests {
@@ -169,5 +265,20 @@ mod tests {
         assert!(healthy.relative_risk < high.relative_risk,
                 "healthy rr {} should be below high-risk rr {}", healthy.relative_risk, high.relative_risk);
         assert!(healthy.relative_risk < 1.0, "healthy profile should be below-average risk");
+    }
+
+    #[test]
+    fn rejects_bad_input() {
+        let b = bundle();
+        let ok = Profile { country: "RO".into(), age: 40.0, sex: "M".into(), smoke: 0, pa_min: 300.0,
+            sleep: 7.0, waist: 90.0, diabetes: false, high_bp: false, respiratory: false, cvd_hx: false,
+            cancer_hx: false, higher_educ: false, income: 2.5 };
+        assert!(estimate(&b, &ok).is_ok());
+        let bad = |f: &dyn Fn(&mut Profile)| { let mut p = ok.clone(); f(&mut p); estimate(&b, &p).is_err() };
+        assert!(bad(&|p| p.pa_min = -5.0), "negative activity rejected");
+        assert!(bad(&|p| p.age = 5.0), "child age rejected");
+        assert!(bad(&|p| p.waist = 5.0), "implausible waist rejected");
+        assert!(bad(&|p| p.sex = "X".into()), "bad sex rejected");
+        assert!(bad(&|p| p.sleep = 30.0), "impossible sleep rejected");
     }
 }

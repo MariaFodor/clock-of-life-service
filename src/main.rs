@@ -17,7 +17,7 @@ use axum::{
 use serde_json::json;
 
 use bundle::Bundle;
-use scoring::{estimate, Estimate, Profile};
+use scoring::{estimate, whatif, Estimate, Profile, WhatIf, WhatIfChanges};
 
 #[tokio::main]
 async fn main() {
@@ -38,6 +38,7 @@ async fn main() {
         .route("/health", get(health))
         .route("/api/meta", get(meta))
         .route("/api/estimate", post(estimate_route))
+        .route("/api/whatif", post(whatif_route))
         .with_state(state);
 
     let addr = "127.0.0.1:8080";
@@ -75,6 +76,22 @@ async fn estimate_route(
     Json(profile): Json<Profile>,
 ) -> Result<Json<Estimate>, (StatusCode, String)> {
     estimate(&b, &profile)
+        .map(Json)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))
+}
+
+#[derive(serde::Deserialize)]
+struct WhatIfRequest {
+    base: Profile,
+    changes: WhatIfChanges,
+}
+
+/// Explore a lifestyle change (non-persisted overlay).
+async fn whatif_route(
+    State(b): State<Arc<Bundle>>,
+    Json(req): Json<WhatIfRequest>,
+) -> Result<Json<WhatIf>, (StatusCode, String)> {
+    whatif(&b, &req.base, &req.changes)
         .map(Json)
         .map_err(|e| (StatusCode::BAD_REQUEST, e))
 }
