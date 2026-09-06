@@ -418,6 +418,38 @@ pub async fn admin_update_rule(
     Ok(Some(after))
 }
 
+/// Pin a model version active (enforcing one-active) AND write a pin_model audit event, atomically.
+/// None if the semver is unknown. Note: the running scorer keeps using its loaded bundle until a
+/// deploy of the pinned bundle — pinning is configuration, not a code change (ADR-006).
+pub async fn admin_pin_model(
+    pool: &PgPool,
+    admin_id: Uuid,
+    semver: &str,
+    audit_citation: &str,
+) -> Result<Option<Value>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let before: Option<Value> =
+        sqlx::query_scalar("SELECT to_jsonb(model_version) FROM model_version WHERE semver = $1")
+            .bind(semver)
+            .fetch_optional(&mut *tx)
+            .await?;
+    let Some(before) = before else { return Ok(None) };
+    // Clear other active rows first, then activate the target — keeps the one_active_model index satisfied.
+    sqlx::query("UPDATE model_version SET is_active = false WHERE is_active AND semver <> $1")
+        .bind(semver)
+        .execute(&mut *tx)
+        .await?;
+    let after: Value = sqlx::query_scalar(
+        "UPDATE model_version SET is_active = true WHERE semver = $1 RETURNING to_jsonb(model_version)",
+    )
+    .bind(semver)
+    .fetch_one(&mut *tx)
+    .await?;
+    audit_in_tx(&mut tx, admin_id, "model_version", semver, "pin_model", Some(&before), Some(&after), audit_citation).await?;
+    tx.commit().await?;
+    Ok(Some(after))
+}
+
 /// Whether an account has the admin flag.
 pub async fn is_admin(pool: &PgPool, account_id: Uuid) -> Result<bool, sqlx::Error> {
     Ok(sqlx::query_scalar::<_, bool>("SELECT is_admin FROM account WHERE id = $1")

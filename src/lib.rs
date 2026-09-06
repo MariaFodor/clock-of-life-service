@@ -111,6 +111,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/admin/features/:key", put(admin_update_feature))
         .route("/api/admin/rules", post(admin_create_rule))
         .route("/api/admin/rules/:code", put(admin_update_rule))
+        .route("/api/admin/model/pin", post(admin_pin_model))
         .with_state(state)
 }
 
@@ -852,6 +853,26 @@ async fn admin_update_rule(
         }
     })?
     .ok_or((StatusCode::NOT_FOUND, format!("unknown rule: {code}")))?;
+    Ok(Json(after))
+}
+
+#[derive(Deserialize)]
+struct PinModelRequest {
+    semver: String,
+    citation: String,
+}
+
+/// Pin a model version active (admin). 404 if the semver is unknown. Writes a pin_model audit event.
+async fn admin_pin_model(
+    State(s): State<Arc<AppState>>,
+    Admin(admin): Admin,
+    Json(req): Json<PinModelRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    require_citation(&req.citation)?;
+    let after = db::admin_pin_model(&s.pool, admin, &req.semver, &req.citation)
+        .await
+        .map_err(db_err)?
+        .ok_or((StatusCode::NOT_FOUND, format!("unknown model version: {}", req.semver)))?;
     Ok(Json(after))
 }
 

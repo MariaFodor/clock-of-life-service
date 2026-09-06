@@ -502,6 +502,35 @@ fn env_is_lever_only_in_relocate() {
     });
 }
 
+/// API-19: admin can pin a model version; one-active enforced; audited; 403/404 guarded.
+#[test]
+fn admin_model_pin() {
+    RT.block_on(async {
+    let s = state().await;
+    let admin = register_admin(&s).await;
+    let user = register_token(&s).await;
+
+    // Non-admin → 403; unknown semver → 404.
+    assert_eq!(build_router(s.clone()).oneshot(post_auth("/api/admin/model/pin", json!({"semver": "2.0.0", "citation": "c"}), &user)).await.unwrap().status(), StatusCode::FORBIDDEN);
+    assert_eq!(build_router(s.clone()).oneshot(post_auth("/api/admin/model/pin", json!({"semver": "9.9.9", "citation": "c"}), &admin)).await.unwrap().status(), StatusCode::NOT_FOUND);
+
+    // Insert a second (inactive) version, pin it, and confirm exactly one active — the new one.
+    sqlx::query("INSERT INTO model_version (semver, artifact_uri, algorithm, is_active) VALUES ('2.0.0-test','test','cox_ph',false) ON CONFLICT (semver) DO NOTHING")
+        .execute(&s.pool).await.unwrap();
+    let resp = build_router(s.clone()).oneshot(post_auth("/api/admin/model/pin", json!({"semver": "2.0.0-test", "citation": "ops: activate test model"}), &admin)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let active: Vec<String> = sqlx::query_scalar("SELECT semver FROM model_version WHERE is_active").fetch_all(&s.pool).await.unwrap();
+    assert_eq!(active, vec!["2.0.0-test".to_string()], "exactly one active, the newly pinned one");
+
+    let audit = body_json(build_router(s.clone()).oneshot(get_auth("/api/admin/audit", &admin)).await.unwrap()).await;
+    assert!(audit.as_array().unwrap().iter().any(|e| e["entity"] == "model_version" && e["action"] == "pin_model"));
+
+    // Restore the real active model and remove the test row (shared DB).
+    build_router(s.clone()).oneshot(post_auth("/api/admin/model/pin", json!({"semver": "2.0.0", "citation": "ops: restore"}), &admin)).await.unwrap();
+    sqlx::query("DELETE FROM model_version WHERE semver = '2.0.0-test'").execute(&s.pool).await.unwrap();
+    });
+}
+
 /// API-18: admin can edit features and create/update rules; invalid values → 400; all audited.
 #[test]
 fn admin_feature_and_rule_mutations() {
