@@ -27,8 +27,23 @@ pub struct Profile {
     #[serde(default)] pub cancer_hx: bool,
     #[serde(default)] pub higher_educ: bool,
     #[serde(default = "default_income")] pub income: f64, // income-to-poverty ratio
+    #[serde(default)] pub pm25: Option<f64>, // home annual-mean PM2.5 µg/m³ (from location, RES-04)
+    #[serde(default)] pub ndvi: Option<f64>, // home greenspace NDVI (from location)
 }
 fn default_income() -> f64 { 2.5 }
+
+// ENV term (RES-04): a location's log-hazard contribution vs the national-average reference. Illustrative
+// RO reference — must be re-sourced with real RO PM2.5/NDVI layers before the relocation surface ships.
+pub const RO_PM25_REF: f64 = 14.0;
+pub const RO_NDVI_REF: f64 = 0.5;
+
+/// The environment log-HR addend for a location: `ln(1.095)·(PM25−ref)/10 + ln(0.965)·(NDVI−ref)/0.1`.
+/// Absent inputs contribute 0 (i.e. treated as the reference), so a location-less profile is unaffected.
+pub fn env_term(pm25: Option<f64>, ndvi: Option<f64>) -> f64 {
+    let air = pm25.map_or(0.0, |p| (1.095_f64).ln() * (p - RO_PM25_REF) / 10.0);
+    let green = ndvi.map_or(0.0, |n| (0.965_f64).ln() * (n - RO_NDVI_REF) / 0.1);
+    air + green
+}
 
 impl Profile {
     /// Reject out-of-range / nonsensical inputs so scoring can't emit NaN/inf or absurd year counts.
@@ -50,6 +65,12 @@ impl Profile {
         }
         rng("waist", self.waist, 40.0, 250.0)?;
         rng("income", self.income, 0.0, 20.0)?;
+        if let Some(pm25) = self.pm25 {
+            rng("pm25", pm25, 0.0, 500.0)?;
+        }
+        if let Some(ndvi) = self.ndvi {
+            rng("ndvi", ndvi, -1.0, 1.0)?;
+        }
         Ok(())
     }
 }
@@ -134,7 +155,10 @@ pub fn remaining_le(qx: &HashMap<String, f64>, start_age: i64, rr: f64) -> f64 {
 fn risk<'a>(bundle: &'a Bundle, p: &Profile) -> Result<(f64, &'a Baseline), String> {
     let base = bundle.baselines.get(&p.country)
         .ok_or_else(|| format!("no baseline for country {}", p.country))?;
-    let lp = linear_predictor(&design(p, &bundle.coefficients), &bundle.coefficients.prediction);
+    // Cohort-fitted linear predictor + the location ENV term (context; 0 for a location-less profile,
+    // and 0 for an average-location user, so the national-average reference is unaffected).
+    let lp = linear_predictor(&design(p, &bundle.coefficients), &bundle.coefficients.prediction)
+        + env_term(p.pm25, p.ndvi);
     let reference = if p.age < bundle.coefficients.young_cutoff { base.reference_lp.young } else { base.reference_lp.old };
     Ok(((lp - reference).exp(), base))
 }
@@ -382,7 +406,7 @@ mod tests {
         let base = |smoke, pa, waist, diab| Profile {
             country: "RO".into(), age: 40.0, sex: "M".into(), smoke, pa_min: pa, sleep: 7.0,
             waist, diabetes: diab, high_bp: diab, respiratory: false, cvd_hx: false, cancer_hx: false,
-            higher_educ: true, income: 4.0,
+            higher_educ: true, income: 4.0, pm25: None, ndvi: None,
         };
         let healthy = estimate(&b, &base(0, 2000.0, 85.0, false)).unwrap();
         let high = estimate(&b, &base(2, 0.0, 115.0, true)).unwrap();
@@ -401,7 +425,7 @@ mod tests {
         let b = bundle();
         let ok = Profile { country: "RO".into(), age: 40.0, sex: "M".into(), smoke: 0, pa_min: 300.0,
             sleep: 7.0, waist: 90.0, diabetes: false, high_bp: false, respiratory: false, cvd_hx: false,
-            cancer_hx: false, higher_educ: false, income: 2.5 };
+            cancer_hx: false, higher_educ: false, income: 2.5, pm25: None, ndvi: None };
         assert!(estimate(&b, &ok).is_ok());
         let bad = |f: &dyn Fn(&mut Profile)| { let mut p = ok.clone(); f(&mut p); estimate(&b, &p).is_err() };
         assert!(bad(&|p| p.pa_min = -5.0), "negative activity rejected");
@@ -412,11 +436,34 @@ mod tests {
     }
 
     #[test]
+    fn env_term_signs_and_neutrality() {
+        assert_eq!(env_term(None, None), 0.0, "no location → no ENV effect");
+        assert!(env_term(Some(RO_PM25_REF), Some(RO_NDVI_REF)).abs() < 1e-12, "reference → ENV 0");
+        assert!(env_term(Some(24.0), Some(RO_NDVI_REF)) > 0.0, "dirtier air → positive log-HR (worse)");
+        assert!(env_term(Some(RO_PM25_REF), Some(0.7)) < 0.0, "greener → negative log-HR (better)");
+    }
+
+    #[test]
+    fn cleaner_location_outlives_polluted() {
+        let b = bundle();
+        let at = |pm25, ndvi| Profile {
+            country: "RO".into(), age: 45.0, sex: "M".into(), smoke: 0, pa_min: 600.0, sleep: 7.0,
+            waist: 90.0, diabetes: false, high_bp: false, respiratory: false, cvd_hx: false,
+            cancer_hx: false, higher_educ: false, income: 2.5,
+            pm25: Some(pm25), ndvi: Some(ndvi),
+        };
+        let polluted = estimate(&b, &at(19.0, 0.35)).unwrap(); // Bucharest-like
+        let clean = estimate(&b, &at(10.0, 0.70)).unwrap();    // rural-like
+        assert!(clean.estimate_years > polluted.estimate_years, "cleaner air + greener → more years");
+        assert!(polluted.relative_risk > clean.relative_risk);
+    }
+
+    #[test]
     fn condition_evaluation() {
         let p = Profile {
             country: "RO".into(), age: 55.0, sex: "M".into(), smoke: 2, pa_min: 100.0, sleep: 9.0,
             waist: 110.0, diabetes: true, high_bp: false, respiratory: false, cvd_hx: false,
-            cancer_hx: false, higher_educ: false, income: 2.5,
+            cancer_hx: false, higher_educ: false, income: 2.5, pm25: None, ndvi: None,
         };
         use serde_json::json;
         assert!(eval_condition(&p, &json!({"field": "smoke", "op": "eq", "value": 2})));
@@ -437,7 +484,7 @@ mod tests {
         let p = Profile {
             country: "RO".into(), age: 55.0, sex: "M".into(), smoke: 2, pa_min: 0.0, sleep: 7.0,
             waist: 115.0, diabetes: true, high_bp: true, respiratory: false, cvd_hx: false,
-            cancer_hx: false, higher_educ: true, income: 4.0,
+            cancer_hx: false, higher_educ: true, income: 4.0, pm25: None, ndvi: None,
         };
         let why = attributions(&b, &p).unwrap();
         assert!(!why.is_empty(), "a high-risk profile should have explanatory factors");
