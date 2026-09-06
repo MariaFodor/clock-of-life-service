@@ -219,6 +219,33 @@ pub async fn list_locations(pool: &PgPool) -> Result<Vec<LocationRow>, sqlx::Err
     .await
 }
 
+/// The id of a location by name (+ country), for setting a profile's home location.
+pub async fn location_id_by_name(
+    pool: &PgPool,
+    name: &str,
+    country: &str,
+) -> Result<Option<Uuid>, sqlx::Error> {
+    sqlx::query_scalar("SELECT id FROM location WHERE name = $1 AND country = $2")
+        .bind(name)
+        .bind(country)
+        .fetch_optional(pool)
+        .await
+}
+
+/// Set (or clear) a profile's home location.
+pub async fn set_home_location(
+    pool: &PgPool,
+    account_id: Uuid,
+    location_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE profile SET home_location_id = $1, updated_at = now() WHERE account_id = $2")
+        .bind(location_id)
+        .bind(account_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 /// A single location by name (+ country), for resolving a relocation target.
 pub async fn location_by_name(
     pool: &PgPool,

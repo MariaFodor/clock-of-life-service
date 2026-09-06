@@ -102,6 +102,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/whatif", post(whatif_route))
         .route("/api/calculations", get(calculations_route))
         .route("/api/profile", get(profile_route))
+        .route("/api/profile/location", post(set_location_route))
         .route("/api/answers", get(get_answers_route).post(post_answers_route))
         .with_state(state)
 }
@@ -520,6 +521,36 @@ async fn profile_route(
         "updated_at": profile.updated_at,
         "answers": answers,
     })))
+}
+
+fn default_country() -> String {
+    "RO".to_string()
+}
+
+#[derive(Deserialize)]
+struct SetLocationRequest {
+    name: String,
+    #[serde(default = "default_country")]
+    country: String,
+}
+
+/// Set the authenticated caller's home location (by name). 404 if the location is unknown.
+async fn set_location_route(
+    State(s): State<Arc<AppState>>,
+    Auth(account): Auth,
+    Json(req): Json<SetLocationRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let location_id = db::location_id_by_name(&s.pool, &req.name, &req.country)
+        .await
+        .map_err(db_err)?
+        .ok_or((
+            StatusCode::NOT_FOUND,
+            format!("unknown location: {} ({})", req.name, req.country),
+        ))?;
+    db::set_home_location(&s.pool, account, location_id)
+        .await
+        .map_err(db_err)?;
+    Ok(Json(json!({ "home_location_id": location_id })))
 }
 
 /// Resolve the caller's profile id (each account has exactly one profile).

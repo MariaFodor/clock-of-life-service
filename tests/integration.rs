@@ -457,6 +457,33 @@ fn references_wired_into_why_and_recommendations() {
     });
 }
 
+/// API-11 + API-13: locations are listed (public); a caller can set their home location.
+#[test]
+fn locations_and_home_location() {
+    RT.block_on(async {
+    let s = state().await;
+    let locs = body_json(build_router(s.clone()).oneshot(get("/api/locations")).await.unwrap()).await;
+    assert!(locs.as_array().unwrap().len() >= 5, "locations seeded and public");
+
+    let token = register_token(&s).await;
+    // Unknown location → 404.
+    assert_eq!(
+        build_router(s.clone()).oneshot(post_auth("/api/profile/location", json!({"name": "Atlantis"}), &token)).await.unwrap().status(),
+        StatusCode::NOT_FOUND);
+    // Set a known location.
+    let resp = build_router(s.clone()).oneshot(post_auth("/api/profile/location", json!({"name": "Cluj-Napoca"}), &token)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(body_json(resp).await["home_location_id"].as_str().is_some());
+    // Profile reflects it.
+    let p = body_json(build_router(s.clone()).oneshot(get_auth("/api/profile", &token)).await.unwrap()).await;
+    assert!(p["home_location_id"].as_str().is_some(), "home location saved on the profile");
+    // No auth → 401.
+    assert_eq!(
+        build_router(s.clone()).oneshot(post("/api/profile/location", json!({"name": "Cluj-Napoca"}))).await.unwrap().status(),
+        StatusCode::UNAUTHORIZED);
+    });
+}
+
 /// API-08: the references endpoint returns studies, filterable by feature/rule.
 #[test]
 fn references_endpoint() {
