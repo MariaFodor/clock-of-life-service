@@ -541,6 +541,29 @@ pub async fn list_locations(pool: &PgPool) -> Result<Vec<LocationRow>, sqlx::Err
     .await
 }
 
+/// The account's own data for GDPR export (never includes the password hash).
+pub async fn account_export_json(pool: &PgPool, id: Uuid) -> Result<Option<Value>, sqlx::Error> {
+    sqlx::query_scalar::<_, Value>(
+        "SELECT jsonb_build_object(
+                    'id', id, 'email_hash', email_hash, 'locale', locale,
+                    'created_at', created_at, 'last_active_at', last_active_at)
+         FROM account WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+}
+
+/// Permanently delete an account and everything cascading from it (profile, answers, calculations,
+/// scenarios). Returns the number of accounts deleted (0 or 1).
+pub async fn delete_account(pool: &PgPool, id: Uuid) -> Result<u64, sqlx::Error> {
+    let r = sqlx::query("DELETE FROM account WHERE id = $1")
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(r.rows_affected())
+}
+
 /// The id of a location by name (+ country), for setting a profile's home location.
 pub async fn location_id_by_name(
     pool: &PgPool,

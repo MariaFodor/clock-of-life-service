@@ -18,7 +18,7 @@ use std::sync::Arc;
 use axum::{
     extract::{Path as AxumPath, Query, State},
     http::StatusCode,
-    routing::{get, post, put},
+    routing::{delete, get, post, put},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
@@ -104,6 +104,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/calculations", get(calculations_route))
         .route("/api/profile", get(profile_route))
         .route("/api/profile/location", post(set_location_route))
+        .route("/api/account/export", get(account_export_route))
+        .route("/api/account", delete(account_delete_route))
         .route("/api/answers", get(get_answers_route).post(post_answers_route))
         .route("/api/admin/audit", get(audit_route))
         .route("/api/admin/questions", post(admin_create_question))
@@ -599,6 +601,42 @@ async fn calculations_route(
         .await
         .map_err(db_err)?;
     Ok(Json(rows))
+}
+
+/// GDPR export (auth): all of the caller's data — account (no password), profile, answers, calculations.
+async fn account_export_route(
+    State(s): State<Arc<AppState>>,
+    Auth(account): Auth,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let account_json = db::account_export_json(&s.pool, account)
+        .await
+        .map_err(db_err)?
+        .ok_or((StatusCode::NOT_FOUND, "account not found".to_string()))?;
+    let profile = db::get_profile(&s.pool, account).await.map_err(db_err)?;
+    let answers = match &profile {
+        Some(p) => db::list_answers(&s.pool, p.id).await.map_err(db_err)?,
+        None => Vec::new(),
+    };
+    let calculations = db::list_calculations(&s.pool, account, 10_000).await.map_err(db_err)?;
+    Ok(Json(json!({
+        "account": account_json,
+        "profile": profile,
+        "answers": answers,
+        "calculations": calculations,
+    })))
+}
+
+/// GDPR erasure (auth): permanently delete the caller's account and all data cascading from it.
+/// (Full erasure; a retention/anonymization policy for reproducibility is open question A7.)
+async fn account_delete_route(
+    State(s): State<Arc<AppState>>,
+    Auth(account): Auth,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let deleted = db::delete_account(&s.pool, account).await.map_err(db_err)?;
+    if deleted == 0 {
+        return Err((StatusCode::NOT_FOUND, "account not found".to_string()));
+    }
+    Ok(Json(json!({ "deleted": true })))
 }
 
 /// The authenticated caller's saved profile: metadata + current answers.

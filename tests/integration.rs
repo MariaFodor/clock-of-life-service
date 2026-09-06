@@ -86,6 +86,15 @@ fn get_auth(uri: &str, token: &str) -> Request<Body> {
         .unwrap()
 }
 
+fn delete_auth(uri: &str, token: &str) -> Request<Body> {
+    Request::builder()
+        .method("DELETE")
+        .uri(uri)
+        .header("authorization", format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap()
+}
+
 async fn body_json(resp: axum::response::Response) -> Value {
     let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
     serde_json::from_slice(&bytes).unwrap()
@@ -606,6 +615,51 @@ fn admin_feature_and_rule_mutations() {
 
     // Clean up the created rule (shared DB).
     sqlx::query("DELETE FROM recommendation_rule WHERE code = $1").bind(&code).execute(&s.pool).await.unwrap();
+    });
+}
+
+/// API-21: GDPR export returns all the caller's data and never the password hash.
+#[test]
+fn account_export() {
+    RT.block_on(async {
+    let s = state().await;
+    let token = register_token(&s).await;
+    build_router(s.clone()).oneshot(post_auth("/api/estimate", valid_profile(), &token)).await.unwrap();
+    build_router(s.clone()).oneshot(post_auth("/api/answers", json!({"answers": [{"question_code": "Q5_smoking", "value": "No, never"}]}), &token)).await.unwrap();
+
+    assert_eq!(build_router(s.clone()).oneshot(get("/api/account/export")).await.unwrap().status(), StatusCode::UNAUTHORIZED);
+    let exp = body_json(build_router(s.clone()).oneshot(get_auth("/api/account/export", &token)).await.unwrap()).await;
+    assert!(exp["account"]["password_hash"].is_null(), "export never includes the password hash");
+    assert!(exp["account"]["id"].as_str().is_some());
+    assert!(exp["answers"].as_array().unwrap().len() >= 1);
+    assert!(exp["calculations"].as_array().unwrap().len() >= 1);
+    });
+}
+
+/// API-22: GDPR erasure deletes the caller's account + cascades; other accounts are untouched.
+#[test]
+fn account_erasure_cascades() {
+    RT.block_on(async {
+    let s = state().await;
+    let a = register_token(&s).await;
+    let b = register_token(&s).await;
+    build_router(s.clone()).oneshot(post_auth("/api/estimate", valid_profile(), &a)).await.unwrap();
+    build_router(s.clone()).oneshot(post_auth("/api/estimate", valid_profile(), &b)).await.unwrap();
+    let a_id = body_json(build_router(s.clone()).oneshot(get_auth("/api/account/export", &a)).await.unwrap()).await["account"]["id"].as_str().unwrap().to_string();
+
+    // Delete A.
+    assert_eq!(build_router(s.clone()).oneshot(delete_auth("/api/account", &a)).await.unwrap().status(), StatusCode::OK);
+
+    // A's account + calculations are gone (cascade); A's export now 404.
+    let acct: i64 = sqlx::query_scalar("SELECT count(*) FROM account WHERE id = $1::uuid").bind(&a_id).fetch_one(&s.pool).await.unwrap();
+    assert_eq!(acct, 0, "account deleted");
+    let calcs: i64 = sqlx::query_scalar("SELECT count(*) FROM calculation WHERE account_id = $1::uuid").bind(&a_id).fetch_one(&s.pool).await.unwrap();
+    assert_eq!(calcs, 0, "calculations cascade-deleted");
+    assert_eq!(build_router(s.clone()).oneshot(get_auth("/api/account/export", &a)).await.unwrap().status(), StatusCode::NOT_FOUND);
+
+    // B is untouched.
+    let b_calcs = body_json(build_router(s.clone()).oneshot(get_auth("/api/calculations", &b)).await.unwrap()).await;
+    assert!(b_calcs.as_array().unwrap().len() >= 1, "other account unaffected");
     });
 }
 
