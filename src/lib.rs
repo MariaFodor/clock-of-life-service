@@ -19,9 +19,34 @@ use std::sync::Arc;
 use axum::{
     extract::{Path as AxumPath, Query, State},
     http::StatusCode,
+    response::{IntoResponse, Response},
     routing::{delete, get, post, put},
     Json, Router,
 };
+
+/// A structured API error rendered as `{"error": "..."}` JSON with its status code.
+pub struct ApiError {
+    status: StatusCode,
+    message: String,
+}
+
+impl ApiError {
+    pub fn new(status: StatusCode, message: impl Into<String>) -> Self {
+        Self { status, message: message.into() }
+    }
+}
+
+impl From<(StatusCode, String)> for ApiError {
+    fn from((status, message): (StatusCode, String)) -> Self {
+        Self { status, message }
+    }
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        (self.status, Json(json!({ "error": self.message }))).into_response()
+    }
+}
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -133,13 +158,13 @@ pub struct Auth(pub Uuid);
 
 #[axum::async_trait]
 impl axum::extract::FromRequestParts<Arc<AppState>> for Auth {
-    type Rejection = (StatusCode, String);
+    type Rejection = ApiError;
 
     async fn from_request_parts(
         parts: &mut axum::http::request::Parts,
         state: &Arc<AppState>,
     ) -> Result<Self, Self::Rejection> {
-        let unauth = |m: &str| (StatusCode::UNAUTHORIZED, m.to_string());
+        let unauth = |m: &str| ApiError::new(StatusCode::UNAUTHORIZED, m);
         let header = parts
             .headers
             .get(axum::http::header::AUTHORIZATION)
@@ -174,7 +199,7 @@ pub struct Admin(pub Uuid);
 
 #[axum::async_trait]
 impl axum::extract::FromRequestParts<Arc<AppState>> for Admin {
-    type Rejection = (StatusCode, String);
+    type Rejection = ApiError;
 
     async fn from_request_parts(
         parts: &mut axum::http::request::Parts,
@@ -184,16 +209,16 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for Admin {
         if db::is_admin(&state.pool, account).await.map_err(db_err)? {
             Ok(Admin(account))
         } else {
-            Err((StatusCode::FORBIDDEN, "admin only".to_string()))
+            Err((StatusCode::FORBIDDEN, "admin only".to_string()).into())
         }
     }
 }
 
-fn db_err(e: sqlx::Error) -> (StatusCode, String) {
+fn db_err(e: sqlx::Error) -> ApiError {
     // Keep the detail server-side; return a generic message so internal query/schema detail never
     // reaches the client.
     eprintln!("database error: {e}");
-    (StatusCode::INTERNAL_SERVER_ERROR, "internal error".to_string())
+    ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
 }
 
 /// First 16 hex chars of the SHA-256 of the serialized inputs (a stable snapshot fingerprint).
@@ -235,7 +260,7 @@ async fn meta(State(s): State<Arc<AppState>>) -> Json<serde_json::Value> {
 /// no individual is exposed. Never a claim about observed mortality (the platform never observes deaths).
 async fn aggregates_route(
     State(s): State<Arc<AppState>>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let overall = db::aggregate_overall(&s.pool).await.map_err(db_err)?;
     let distribution = if overall.n >= db::AGGREGATE_MIN_K {
         json!({"mean": overall.mean, "p10": overall.p10, "p50": overall.p50, "p90": overall.p90})
@@ -255,7 +280,7 @@ async fn aggregates_route(
 /// All known locations with their PM2.5 / greenspace (public — powers the location picker + compare).
 async fn locations_route(
     State(s): State<Arc<AppState>>,
-) -> Result<Json<Vec<db::LocationRow>>, (StatusCode, String)> {
+) -> Result<Json<Vec<db::LocationRow>>, ApiError> {
     let rows = db::list_locations(&s.pool).await.map_err(db_err)?;
     Ok(Json(rows))
 }
@@ -270,7 +295,7 @@ struct RefQuery {
 async fn references_route(
     State(s): State<Arc<AppState>>,
     Query(q): Query<RefQuery>,
-) -> Result<Json<Vec<db::Study>>, (StatusCode, String)> {
+) -> Result<Json<Vec<db::Study>>, ApiError> {
     let studies = match (q.feature.as_deref(), q.rule.as_deref()) {
         (Some(feature), _) => db::studies_for_feature(&s.pool, feature).await,
         (None, Some(rule)) => db::studies_for_rule(&s.pool, rule).await,
@@ -283,7 +308,7 @@ async fn references_route(
 /// The interview definition (public — the frontend renders onboarding before sign-up).
 async fn questions_route(
     State(s): State<Arc<AppState>>,
-) -> Result<Json<Vec<db::QuestionRow>>, (StatusCode, String)> {
+) -> Result<Json<Vec<db::QuestionRow>>, ApiError> {
     let rows = db::list_questions(&s.pool).await.map_err(db_err)?;
     Ok(Json(rows))
 }
@@ -311,12 +336,12 @@ struct AuthResponse {
 async fn register_route(
     State(s): State<Arc<AppState>>,
     Json(req): Json<RegisterRequest>,
-) -> Result<Json<AuthResponse>, (StatusCode, String)> {
+) -> Result<Json<AuthResponse>, ApiError> {
     if req.email.trim().is_empty() {
-        return Err((StatusCode::BAD_REQUEST, "email required".to_string()));
+        return Err((StatusCode::BAD_REQUEST, "email required".to_string()).into());
     }
     if req.password.len() < 8 {
-        return Err((StatusCode::BAD_REQUEST, "password must be at least 8 characters".to_string()));
+        return Err((StatusCode::BAD_REQUEST, "password must be at least 8 characters".to_string()).into());
     }
     let email_hash = auth::email_hash(&req.email);
     let password_hash = auth::hash_password(&req.password)
@@ -326,7 +351,7 @@ async fn register_route(
         .await
         .map_err(|e| {
             if db::is_unique_violation(&e) {
-                (StatusCode::CONFLICT, "account already exists".to_string())
+                ApiError::new(StatusCode::CONFLICT, "account already exists")
             } else {
                 db_err(e)
             }
@@ -346,12 +371,12 @@ struct LoginRequest {
 async fn login_route(
     State(s): State<Arc<AppState>>,
     Json(req): Json<LoginRequest>,
-) -> Result<Json<AuthResponse>, (StatusCode, String)> {
+) -> Result<Json<AuthResponse>, ApiError> {
     let email_hash = auth::email_hash(&req.email);
     let account = db::find_account_by_email_hash(&s.pool, &email_hash)
         .await
         .map_err(db_err)?;
-    let unauthorized = || (StatusCode::UNAUTHORIZED, "invalid credentials".to_string());
+    let unauthorized = || ApiError::new(StatusCode::UNAUTHORIZED, "invalid credentials");
     match account {
         Some((account_id, password_hash)) => {
             if !auth::verify_password(&req.password, &password_hash) {
@@ -391,7 +416,7 @@ struct EstimateResponse {
 /// Group all feature→study links into a lookup by feature key (one query).
 async fn references_by_feature(
     pool: &sqlx::postgres::PgPool,
-) -> Result<HashMap<String, Vec<db::Study>>, (StatusCode, String)> {
+) -> Result<HashMap<String, Vec<db::Study>>, ApiError> {
     let rows = db::all_feature_studies(pool).await.map_err(db_err)?;
     let mut map: HashMap<String, Vec<db::Study>> = HashMap::new();
     for row in rows {
@@ -406,7 +431,7 @@ async fn estimate_route(
     State(s): State<Arc<AppState>>,
     OptionalAuth(account): OptionalAuth,
     Json(profile): Json<Profile>,
-) -> Result<Json<EstimateResponse>, (StatusCode, String)> {
+) -> Result<Json<EstimateResponse>, ApiError> {
     let est = estimate(&s.bundle, &profile).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     let raw_why = attributions(&s.bundle, &profile).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     // Enrich each factor with its openable study references.
@@ -468,7 +493,7 @@ struct Recommendation {
 async fn recommendations_route(
     State(s): State<Arc<AppState>>,
     Json(profile): Json<Profile>,
-) -> Result<Json<Vec<Recommendation>>, (StatusCode, String)> {
+) -> Result<Json<Vec<Recommendation>>, ApiError> {
     // attributions() validates the profile and gives the per-factor years-at-stake used for ranking.
     let why = attributions(&s.bundle, &profile).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     let impact: std::collections::HashMap<&str, f64> =
@@ -529,7 +554,7 @@ struct RelocateRequest {
 async fn relocate_route(
     State(s): State<Arc<AppState>>,
     Json(req): Json<RelocateRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let round1 = |x: f64| (x * 10.0).round() / 10.0;
     let to = db::location_by_name(&s.pool, &req.to, &req.country)
         .await
@@ -601,7 +626,7 @@ async fn whatif_route(
     State(s): State<Arc<AppState>>,
     OptionalAuth(account): OptionalAuth,
     Json(req): Json<WhatIfRequest>,
-) -> Result<Json<WhatIfResponse>, (StatusCode, String)> {
+) -> Result<Json<WhatIfResponse>, ApiError> {
     let wi = whatif(&s.bundle, &req.base, &req.changes).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     let scenario_id = if let Some(base_id) = req.base_calculation_id {
         // Persisting a scenario requires auth and that the base calculation belongs to the caller.
@@ -611,8 +636,8 @@ async fn whatif_route(
         ))?;
         match db::calculation_owner(&s.pool, base_id).await.map_err(db_err)? {
             Some(owner) if owner == account => {}
-            Some(_) => return Err((StatusCode::FORBIDDEN, "not your calculation".to_string())),
-            None => return Err((StatusCode::NOT_FOUND, "base calculation not found".to_string())),
+            Some(_) => return Err((StatusCode::FORBIDDEN, "not your calculation".to_string()).into()),
+            None => return Err((StatusCode::NOT_FOUND, "base calculation not found".to_string()).into()),
         }
         let modifications = serde_json::to_value(&req.changes)
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialize changes: {e}")))?;
@@ -633,7 +658,7 @@ async fn whatif_route(
 async fn calculations_route(
     State(s): State<Arc<AppState>>,
     Auth(account): Auth,
-) -> Result<Json<Vec<db::CalcRow>>, (StatusCode, String)> {
+) -> Result<Json<Vec<db::CalcRow>>, ApiError> {
     let rows = db::list_calculations(&s.pool, account, 50)
         .await
         .map_err(db_err)?;
@@ -644,7 +669,7 @@ async fn calculations_route(
 async fn account_export_route(
     State(s): State<Arc<AppState>>,
     Auth(account): Auth,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let account_json = db::account_export_json(&s.pool, account)
         .await
         .map_err(db_err)?
@@ -673,13 +698,13 @@ async fn account_update_route(
     State(s): State<Arc<AppState>>,
     Auth(account): Auth,
     Json(req): Json<AccountUpdate>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     if req.locale.trim().is_empty() {
-        return Err((StatusCode::BAD_REQUEST, "locale must not be empty".to_string()));
+        return Err((StatusCode::BAD_REQUEST, "locale must not be empty".to_string()).into());
     }
     let updated = db::update_account_locale(&s.pool, account, &req.locale).await.map_err(db_err)?;
     if updated == 0 {
-        return Err((StatusCode::NOT_FOUND, "account not found".to_string()));
+        return Err((StatusCode::NOT_FOUND, "account not found".to_string()).into());
     }
     Ok(Json(json!({ "locale": req.locale })))
 }
@@ -689,10 +714,10 @@ async fn account_update_route(
 async fn account_delete_route(
     State(s): State<Arc<AppState>>,
     Auth(account): Auth,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let deleted = db::delete_account(&s.pool, account).await.map_err(db_err)?;
     if deleted == 0 {
-        return Err((StatusCode::NOT_FOUND, "account not found".to_string()));
+        return Err((StatusCode::NOT_FOUND, "account not found".to_string()).into());
     }
     Ok(Json(json!({ "deleted": true })))
 }
@@ -701,11 +726,11 @@ async fn account_delete_route(
 async fn profile_route(
     State(s): State<Arc<AppState>>,
     Auth(account): Auth,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let profile = db::get_profile(&s.pool, account)
         .await
         .map_err(db_err)?
-        .ok_or((StatusCode::INTERNAL_SERVER_ERROR, "no profile for account".to_string()))?;
+        .ok_or_else(|| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "no profile for account"))?;
     let answers = db::list_answers(&s.pool, profile.id).await.map_err(db_err)?;
     Ok(Json(json!({
         "profile_id": profile.id,
@@ -731,7 +756,7 @@ async fn set_location_route(
     State(s): State<Arc<AppState>>,
     Auth(account): Auth,
     Json(req): Json<SetLocationRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let location_id = db::location_id_by_name(&s.pool, &req.name, &req.country)
         .await
         .map_err(db_err)?
@@ -746,9 +771,9 @@ async fn set_location_route(
 }
 
 /// Admin mutations must cite their evidence (evidence-traceability); reject a blank citation.
-fn require_citation(citation: &str) -> Result<(), (StatusCode, String)> {
+fn require_citation(citation: &str) -> Result<(), ApiError> {
     if citation.trim().is_empty() {
-        Err((StatusCode::BAD_REQUEST, "citation is required for admin changes".to_string()))
+        Err((StatusCode::BAD_REQUEST, "citation is required for admin changes".to_string()).into())
     } else {
         Ok(())
     }
@@ -781,7 +806,7 @@ async fn admin_create_question(
     State(s): State<Arc<AppState>>,
     Admin(admin): Admin,
     Json(req): Json<QuestionCreate>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     require_citation(&req.citation)?;
     let after = db::admin_create_question(
         &s.pool, admin, &req.code, &req.section, &req.text, &req.input_type,
@@ -791,9 +816,9 @@ async fn admin_create_question(
     .await
     .map_err(|e| {
         if db::is_unique_violation(&e) {
-            (StatusCode::CONFLICT, "question code already exists".to_string())
+            ApiError::new(StatusCode::CONFLICT, "question code already exists")
         } else if db::is_foreign_key_violation(&e) {
-            (StatusCode::BAD_REQUEST, "unknown feature_key".to_string())
+            ApiError::new(StatusCode::BAD_REQUEST, "unknown feature_key")
         } else {
             db_err(e)
         }
@@ -826,7 +851,7 @@ async fn admin_update_question(
     Admin(admin): Admin,
     AxumPath(code): AxumPath<String>,
     Json(req): Json<QuestionUpdate>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     require_citation(&req.citation)?;
     let after = db::admin_update_question(
         &s.pool, admin, &code, req.section.as_deref(), req.text.as_deref(), req.input_type.as_deref(),
@@ -855,7 +880,7 @@ async fn admin_update_feature(
     Admin(admin): Admin,
     AxumPath(key): AxumPath<String>,
     Json(req): Json<FeatureUpdate>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     require_citation(&req.citation)?;
     let after = db::admin_update_feature(
         &s.pool, admin, &key, req.name.as_deref(), req.role.as_deref(), req.evidence_grade.as_deref(),
@@ -864,7 +889,7 @@ async fn admin_update_feature(
     .await
     .map_err(|e| {
         if db::is_check_violation(&e) {
-            (StatusCode::BAD_REQUEST, "invalid role or evidence_grade".to_string())
+            ApiError::new(StatusCode::BAD_REQUEST, "invalid role or evidence_grade")
         } else {
             db_err(e)
         }
@@ -891,10 +916,10 @@ async fn admin_create_rule(
     State(s): State<Arc<AppState>>,
     Admin(admin): Admin,
     Json(req): Json<RuleCreate>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     require_citation(&req.citation)?;
     if req.evidence_citation.trim().is_empty() {
-        return Err((StatusCode::BAD_REQUEST, "evidence_citation is required for a rule".to_string()));
+        return Err((StatusCode::BAD_REQUEST, "evidence_citation is required for a rule".to_string()).into());
     }
     let after = db::admin_create_rule(
         &s.pool, admin, &req.code, &req.feature_key, &req.condition, &req.message, req.priority,
@@ -903,9 +928,9 @@ async fn admin_create_rule(
     .await
     .map_err(|e| {
         if db::is_unique_violation(&e) {
-            (StatusCode::CONFLICT, "rule code already exists".to_string())
+            ApiError::new(StatusCode::CONFLICT, "rule code already exists")
         } else if db::is_foreign_key_violation(&e) {
-            (StatusCode::BAD_REQUEST, "unknown feature_key".to_string())
+            ApiError::new(StatusCode::BAD_REQUEST, "unknown feature_key")
         } else {
             db_err(e)
         }
@@ -930,11 +955,11 @@ async fn admin_update_rule(
     Admin(admin): Admin,
     AxumPath(code): AxumPath<String>,
     Json(req): Json<RuleUpdate>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     require_citation(&req.citation)?;
     // A rule's evidence citation must never be blanked (evidence traceability).
     if req.evidence_citation.as_deref().is_some_and(|c| c.trim().is_empty()) {
-        return Err((StatusCode::BAD_REQUEST, "evidence_citation cannot be blank".to_string()));
+        return Err((StatusCode::BAD_REQUEST, "evidence_citation cannot be blank".to_string()).into());
     }
     let after = db::admin_update_rule(
         &s.pool, admin, &code, req.feature_key.as_deref(), req.condition.as_ref(), req.message.as_deref(),
@@ -943,7 +968,7 @@ async fn admin_update_rule(
     .await
     .map_err(|e| {
         if db::is_foreign_key_violation(&e) {
-            (StatusCode::BAD_REQUEST, "unknown feature_key".to_string())
+            ApiError::new(StatusCode::BAD_REQUEST, "unknown feature_key")
         } else {
             db_err(e)
         }
@@ -963,7 +988,7 @@ async fn admin_pin_model(
     State(s): State<Arc<AppState>>,
     Admin(admin): Admin,
     Json(req): Json<PinModelRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     require_citation(&req.citation)?;
     let after = db::admin_pin_model(&s.pool, admin, &req.semver, &req.citation)
         .await
@@ -976,17 +1001,17 @@ async fn admin_pin_model(
 async fn audit_route(
     State(s): State<Arc<AppState>>,
     Admin(_admin): Admin,
-) -> Result<Json<Vec<db::AuditRow>>, (StatusCode, String)> {
+) -> Result<Json<Vec<db::AuditRow>>, ApiError> {
     let rows = db::list_audit_events(&s.pool, 200).await.map_err(db_err)?;
     Ok(Json(rows))
 }
 
 /// Resolve the caller's profile id (each account has exactly one profile).
-async fn caller_profile(s: &AppState, account: Uuid) -> Result<Uuid, (StatusCode, String)> {
+async fn caller_profile(s: &AppState, account: Uuid) -> Result<Uuid, ApiError> {
     db::profile_id_for_account(&s.pool, account)
         .await
         .map_err(db_err)?
-        .ok_or((StatusCode::INTERNAL_SERVER_ERROR, "no profile for account".to_string()))
+        .ok_or_else(|| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "no profile for account"))
 }
 
 #[derive(Deserialize)]
@@ -1005,13 +1030,13 @@ async fn post_answers_route(
     State(s): State<Arc<AppState>>,
     Auth(account): Auth,
     Json(req): Json<AnswersRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let profile_id = caller_profile(&s, account).await?;
     for a in &req.answers {
         db::upsert_answer(&s.pool, profile_id, &a.question_code, &a.value)
             .await
             .map_err(|e| match e {
-                sqlx::Error::RowNotFound => (
+                sqlx::Error::RowNotFound => ApiError::new(
                     StatusCode::BAD_REQUEST,
                     format!("unknown question code: {}", a.question_code),
                 ),
@@ -1025,7 +1050,7 @@ async fn post_answers_route(
 async fn get_answers_route(
     State(s): State<Arc<AppState>>,
     Auth(account): Auth,
-) -> Result<Json<Vec<db::AnswerRow>>, (StatusCode, String)> {
+) -> Result<Json<Vec<db::AnswerRow>>, ApiError> {
     let profile_id = caller_profile(&s, account).await?;
     let rows = db::list_answers(&s.pool, profile_id).await.map_err(db_err)?;
     Ok(Json(rows))

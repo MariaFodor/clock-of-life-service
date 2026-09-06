@@ -815,6 +815,31 @@ fn spa_served_with_fallback() {
     });
 }
 
+/// API-28: error responses are structured JSON ({"error": "..."}), not plain text.
+#[test]
+fn errors_are_structured_json() {
+    RT.block_on(async {
+    let s = state().await;
+    // 401 (no auth).
+    let resp = build_router(s.clone()).oneshot(get("/api/calculations")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    let body = body_json(resp).await;
+    assert!(body["error"].as_str().is_some(), "401 body is JSON with an error field");
+
+    // 400 (validation).
+    let mut bad = valid_profile();
+    bad["age"] = json!(5);
+    let resp = build_router(s.clone()).oneshot(post("/api/estimate", bad)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert!(body_json(resp).await["error"].as_str().is_some(), "400 body is JSON");
+
+    // 404 (unknown relocate target).
+    let resp = build_router(s.clone()).oneshot(post("/api/relocate", json!({"base": valid_profile(), "to": "Nowhere"}))).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    assert!(body_json(resp).await["error"].as_str().is_some(), "404 body is JSON");
+    });
+}
+
 /// API-16: the admin surface is gated — 401 unauthenticated, 403 for a regular user, 200 for an admin.
 #[test]
 fn admin_gate() {
