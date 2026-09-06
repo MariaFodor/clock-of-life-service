@@ -4,6 +4,7 @@
 //! persistence (accounts, calculation snapshots, admin) is a later slice, gated on PostgreSQL.
 
 mod bundle;
+mod scoring;
 
 use std::sync::Arc;
 
