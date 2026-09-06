@@ -9,6 +9,8 @@ scenarios and reconciles its reference tables (features, questions, active model
 - Default connection: `postgresql:///clock_of_life?host=/var/run/postgresql` (unix socket, peer auth).
   Override with the `DATABASE_URL` env var. The database must exist; tables are created by the
   migrations at startup.
+- `JWT_SECRET` signs bearer tokens. **Set it in production** — an unset secret falls back to an
+  insecure development key (with a startup warning).
 
 ```bash
 createdb clock_of_life          # once
@@ -34,14 +36,20 @@ cargo test
 ## Endpoints
 - `GET /health` — liveness
 - `GET /api/meta` — active model version + provenance
-- `POST /api/estimate` — answers → Life Clock (years, interval, relative risk); persists a `calculation`,
-  returns its `calculation_id`
-- `POST /api/whatif` — lifestyle-change overlay; persists a `scenario` when `base_calculation_id` is given
-- `GET /api/calculations` — calculation history (most recent first)
-- `GET` / `POST /api/answers` — read / upsert questionnaire answers (one current answer per question)
+- `POST /api/auth/register` — create an account (`email` + `password` ≥ 8); returns a bearer token
+- `POST /api/auth/login` — verify credentials; returns a bearer token
+- `POST /api/estimate` — answers → Life Clock; persists a `calculation` to the caller (or the anonymous
+  account when unauthenticated), returns its `calculation_id`
+- `POST /api/whatif` — lifestyle-change overlay; persists a `scenario` when `base_calculation_id` is
+  given (requires auth + ownership of that calculation)
+- `GET /api/calculations` — the caller's calculation history *(auth required)*
+- `GET` / `POST /api/answers` — read / upsert the caller's questionnaire answers *(auth required)*
+
+Authenticated requests send `Authorization: Bearer <token>`.
 
 ## Status
-Persist-and-read-back service. Scoring is Cox, country-aware (30 Eurostat baselines); age/sex resolve
-against the national life table, lifestyle/pathology against the fitted coefficients. **Pre-auth:** all
-calculations/answers share a single pseudonymous *anonymous* account until accounts + auth land
-(SVC-DB5), which will introduce per-user ownership and isolation.
+Persist-and-read-back service with accounts + auth. Scoring is Cox, country-aware (30 Eurostat
+baselines); age/sex resolve against the national life table, lifestyle/pathology against the fitted
+coefficients. Auth is pseudonymous (argon2 passwords, JWT bearer tokens, email stored only as a
+one-way hash — ADR-002); calculations/answers are isolated per account. Anonymous estimates persist to
+a shared anonymous account (try-before-signup). **Next:** SVC-DB6 (admin mutations + audit).
