@@ -25,6 +25,59 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), sqlx::migrate::MigrateE
     MIGRATOR.run(pool).await
 }
 
+/// True if the error is a unique-constraint violation (e.g. duplicate email_hash) → map to 409.
+pub fn is_unique_violation(e: &sqlx::Error) -> bool {
+    matches!(e, sqlx::Error::Database(db) if db.is_unique_violation())
+}
+
+/// Create an account and its (empty) profile in one transaction. Returns (account_id, profile_id).
+/// A duplicate `email_hash` surfaces as a unique-violation error (see `is_unique_violation`).
+pub async fn create_account(
+    pool: &PgPool,
+    email_hash: &str,
+    password_hash: &str,
+    locale: &str,
+) -> Result<(Uuid, Uuid), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let account_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO account (email_hash, password_hash, locale) VALUES ($1, $2, $3) RETURNING id",
+    )
+    .bind(email_hash)
+    .bind(password_hash)
+    .bind(locale)
+    .fetch_one(&mut *tx)
+    .await?;
+    let profile_id: Uuid =
+        sqlx::query_scalar("INSERT INTO profile (account_id) VALUES ($1) RETURNING id")
+            .bind(account_id)
+            .fetch_one(&mut *tx)
+            .await?;
+    tx.commit().await?;
+    Ok((account_id, profile_id))
+}
+
+/// Look up an account by its email hash, returning (id, stored password hash) if present.
+pub async fn find_account_by_email_hash(
+    pool: &PgPool,
+    email_hash: &str,
+) -> Result<Option<(Uuid, String)>, sqlx::Error> {
+    sqlx::query_as("SELECT id, password_hash FROM account WHERE email_hash = $1")
+        .bind(email_hash)
+        .fetch_optional(pool)
+        .await
+}
+
+/// The profile id owned by an account (each account has exactly one profile).
+pub async fn profile_id_for_account(
+    pool: &PgPool,
+    account_id: Uuid,
+) -> Result<Option<Uuid>, sqlx::Error> {
+    sqlx::query_scalar("SELECT id FROM profile WHERE account_id = $1")
+        .bind(account_id)
+        .fetch_optional(pool)
+        .await
+}
+
 /// One row of a user's append-only calculation history.
 #[derive(Serialize, sqlx::FromRow)]
 pub struct CalcRow {

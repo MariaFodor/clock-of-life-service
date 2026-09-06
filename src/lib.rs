@@ -36,12 +36,28 @@ pub struct AppState {
     pub active_model_id: Uuid,
     pub anon_account_id: Uuid,
     pub anon_profile_id: Uuid,
+    /// HS256 signing key for bearer tokens.
+    pub jwt_secret: Vec<u8>,
+    /// Bearer-token lifetime in seconds.
+    pub token_ttl_secs: i64,
 }
 
 /// Connection string for the application database (unix socket + peer auth by default).
 pub fn default_database_url() -> String {
     std::env::var("DATABASE_URL")
         .unwrap_or_else(|_| "postgresql:///clock_of_life?host=/var/run/postgresql".to_string())
+}
+
+/// The JWT signing secret from `JWT_SECRET`. Falls back to an insecure dev key with a loud warning —
+/// production must set `JWT_SECRET` (tokens signed with the dev key are worthless if the env is set).
+pub fn jwt_secret() -> Vec<u8> {
+    match std::env::var("JWT_SECRET") {
+        Ok(s) if !s.is_empty() => s.into_bytes(),
+        _ => {
+            eprintln!("WARNING: JWT_SECRET not set — using an insecure development key. Set JWT_SECRET in production.");
+            b"insecure-dev-key-do-not-use-in-production".to_vec()
+        }
+    }
 }
 
 /// Load the bundle, connect, migrate, and reconcile — producing ready-to-serve state.
@@ -62,6 +78,8 @@ pub async fn init_state(bundle_dir: &str, database_url: &str) -> Result<Arc<AppS
         active_model_id: seeded.active_model_id,
         anon_account_id: seeded.anon_account_id,
         anon_profile_id: seeded.anon_profile_id,
+        jwt_secret: jwt_secret(),
+        token_ttl_secs: 7 * 24 * 3600, // 7 days
     }))
 }
 
@@ -70,6 +88,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/api/meta", get(meta))
+        .route("/api/auth/register", post(register_route))
+        .route("/api/auth/login", post(login_route))
         .route("/api/estimate", post(estimate_route))
         .route("/api/whatif", post(whatif_route))
         .route("/api/calculations", get(calculations_route))
@@ -112,6 +132,87 @@ async fn meta(State(s): State<Arc<AppState>>) -> Json<serde_json::Value> {
             "relative risk centred on the selected country's average person",
         ],
     }))
+}
+
+/// A valid argon2 hash of a throwaway value, used to equalize login timing when no account matches
+/// (so response time doesn't reveal whether an email is registered). Computed once.
+static DUMMY_PW_HASH: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(|| auth::hash_password("timing-equalizer").unwrap_or_default());
+
+#[derive(Deserialize)]
+struct RegisterRequest {
+    email: String,
+    password: String,
+    #[serde(default)]
+    locale: Option<String>,
+}
+
+#[derive(Serialize)]
+struct AuthResponse {
+    token: String,
+    account_id: Uuid,
+}
+
+/// Create an account (+ empty profile) and return a bearer token.
+async fn register_route(
+    State(s): State<Arc<AppState>>,
+    Json(req): Json<RegisterRequest>,
+) -> Result<Json<AuthResponse>, (StatusCode, String)> {
+    if req.email.trim().is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "email required".to_string()));
+    }
+    if req.password.len() < 8 {
+        return Err((StatusCode::BAD_REQUEST, "password must be at least 8 characters".to_string()));
+    }
+    let email_hash = auth::email_hash(&req.email);
+    let password_hash = auth::hash_password(&req.password)
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "internal error".to_string()))?;
+    let locale = req.locale.as_deref().unwrap_or("ro");
+    let (account_id, _profile_id) = db::create_account(&s.pool, &email_hash, &password_hash, locale)
+        .await
+        .map_err(|e| {
+            if db::is_unique_violation(&e) {
+                (StatusCode::CONFLICT, "account already exists".to_string())
+            } else {
+                db_err(e)
+            }
+        })?;
+    let token = auth::issue_token(account_id, &s.jwt_secret, s.token_ttl_secs)
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "internal error".to_string()))?;
+    Ok(Json(AuthResponse { token, account_id }))
+}
+
+#[derive(Deserialize)]
+struct LoginRequest {
+    email: String,
+    password: String,
+}
+
+/// Verify credentials and return a bearer token. Uniform 401 whether the email or the password is wrong.
+async fn login_route(
+    State(s): State<Arc<AppState>>,
+    Json(req): Json<LoginRequest>,
+) -> Result<Json<AuthResponse>, (StatusCode, String)> {
+    let email_hash = auth::email_hash(&req.email);
+    let account = db::find_account_by_email_hash(&s.pool, &email_hash)
+        .await
+        .map_err(db_err)?;
+    let unauthorized = || (StatusCode::UNAUTHORIZED, "invalid credentials".to_string());
+    match account {
+        Some((account_id, password_hash)) => {
+            if !auth::verify_password(&req.password, &password_hash) {
+                return Err(unauthorized());
+            }
+            let token = auth::issue_token(account_id, &s.jwt_secret, s.token_ttl_secs)
+                .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "internal error".to_string()))?;
+            Ok(Json(AuthResponse { token, account_id }))
+        }
+        None => {
+            // Equalize timing with the password-verify path above; result ignored.
+            let _ = auth::verify_password(&req.password, &DUMMY_PW_HASH);
+            Err(unauthorized())
+        }
+    }
 }
 
 #[derive(Serialize)]
