@@ -45,6 +45,8 @@ pub struct AppState {
     pub jwt_secret: Vec<u8>,
     /// Bearer-token lifetime in seconds.
     pub token_ttl_secs: i64,
+    /// Directory of the built SPA to serve (client-side routing falls back to its index.html).
+    pub web_dist: String,
 }
 
 /// Connection string for the application database (unix socket + peer auth by default).
@@ -85,6 +87,7 @@ pub async fn init_state(bundle_dir: &str, database_url: &str) -> Result<Arc<AppS
         anon_profile_id: seeded.anon_profile_id,
         jwt_secret: jwt_secret(),
         token_ttl_secs: 7 * 24 * 3600, // 7 days
+        web_dist: std::env::var("WEB_DIST").unwrap_or_else(|_| "web-dist".to_string()),
     }))
 }
 
@@ -117,6 +120,11 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/admin/rules", post(admin_create_rule))
         .route("/api/admin/rules/:code", put(admin_update_rule))
         .route("/api/admin/model/pin", post(admin_pin_model))
+        // Serve the built SPA for any non-API path; unknown deep links fall back to index.html.
+        .fallback_service(
+            tower_http::services::ServeDir::new(&state.web_dist)
+                .fallback(tower_http::services::ServeFile::new(format!("{}/index.html", state.web_dist))),
+        )
         .with_state(state)
 }
 

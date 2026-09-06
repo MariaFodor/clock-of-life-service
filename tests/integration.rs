@@ -782,6 +782,39 @@ fn openapi_lists_all_routes() {
     });
 }
 
+/// API-27: the SPA is served with a client-side-routing fallback; API routes take precedence.
+#[test]
+fn spa_served_with_fallback() {
+    RT.block_on(async {
+    let s = state().await;
+    // A throwaway dist dir with an index.html.
+    let dir = std::env::temp_dir().join(format!("clockspa_{}_{}", std::process::id(), COUNTER_CODE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("index.html"), "<!doctype html><title>Clock SPA</title>").unwrap();
+
+    // A state pointing at that dist (reuses the shared pool/bundle).
+    let custom = Arc::new(AppState {
+        bundle: s.bundle.clone(), pool: s.pool.clone(), active_model_id: s.active_model_id,
+        anon_account_id: s.anon_account_id, anon_profile_id: s.anon_profile_id,
+        jwt_secret: s.jwt_secret.clone(), token_ttl_secs: s.token_ttl_secs,
+        web_dist: dir.to_string_lossy().to_string(),
+    });
+
+    // A deep link (no such file) falls back to index.html.
+    let resp = build_router(custom.clone()).oneshot(get("/dashboard/deep/link")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    assert!(String::from_utf8_lossy(&bytes).contains("Clock SPA"), "deep link serves the SPA index");
+
+    // API routes still take precedence over the SPA fallback.
+    let health = build_router(custom.clone()).oneshot(get("/health")).await.unwrap();
+    assert_eq!(health.status(), StatusCode::OK);
+    assert_eq!(body_json(health).await["status"], "ok");
+
+    let _ = std::fs::remove_dir_all(&dir);
+    });
+}
+
 /// API-16: the admin surface is gated — 401 unauthenticated, 403 for a regular user, 200 for an admin.
 #[test]
 fn admin_gate() {
