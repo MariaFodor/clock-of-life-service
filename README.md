@@ -36,20 +36,29 @@ cargo test
 ## Endpoints
 - `GET /health` — liveness
 - `GET /api/meta` — active model version + provenance
+- `GET /api/questions` — the 24-question interview definition *(public)*
+- `GET /api/references` — evidence studies (openable DOIs / reviews); `?feature=<key>` or `?rule=<code>` *(public)*
+- `GET /api/locations` — locations with PM2.5 / greenspace *(public)*
 - `POST /api/auth/register` — create an account (`email` + `password` ≥ 8); returns a bearer token
 - `POST /api/auth/login` — verify credentials; returns a bearer token
-- `POST /api/estimate` — answers → Life Clock; persists a `calculation` to the caller (or the anonymous
-  account when unauthenticated), returns its `calculation_id`
+- `POST /api/estimate` — answers → Life Clock **+ `why[]` (per-factor deltas + references) + `model` provenance**;
+  persists a `calculation` to the caller (or the anonymous account when unauthenticated)
+- `POST /api/recommendations` — prioritized, evidence-cited advice (levers/manage only) *(pure)*
 - `POST /api/whatif` — lifestyle-change overlay; persists a `scenario` when `base_calculation_id` is
   given (requires auth + ownership of that calculation)
+- `POST /api/relocate` — "Where Should I Live?": compare a candidate location, with air/greenspace breakdown *(pure)*
 - `GET /api/calculations` — the caller's calculation history *(auth required)*
 - `GET` / `POST /api/answers` — read / upsert the caller's questionnaire answers *(auth required)*
+- `GET /api/profile` — the caller's saved profile + answers; `POST /api/profile/location` sets the home location *(auth required)*
 
 Authenticated requests send `Authorization: Bearer <token>`.
 
 ## Status
-Persist-and-read-back service with accounts + auth. Scoring is Cox, country-aware (30 Eurostat
-baselines); age/sex resolve against the national life table, lifestyle/pathology against the fitted
-coefficients. Auth is pseudonymous (argon2 passwords, JWT bearer tokens, email stored only as a
-one-way hash — ADR-002); calculations/answers are isolated per account. Anonymous estimates persist to
-a shared anonymous account (try-before-signup). **Next:** SVC-DB6 (admin mutations + audit).
+Full results/evidence/environment API over a persist-and-read-back core. Scoring is Cox, country-aware
+(30 Eurostat baselines); age/sex resolve against the national life table, lifestyle/pathology against
+the fitted coefficients, and a location ENV term (PM2.5 + greenspace, RES-04). Estimates carry a per-
+factor "Why?" breakdown and prioritized recommendations, each linked to openable studies (DOIs /
+`analysed_papers` reviews). Auth is pseudonymous (argon2, JWT, email one-way-hashed — ADR-002);
+calculations/answers isolated per account. **Data caveat:** the Romanian PM2.5/NDVI location values are
+illustrative placeholders (RES-04) pending real sourced layers. **Next:** Bundle 6D (admin + audit),
+then 6E (privacy/GDPR + aggregates), 6F (OpenAPI + SPA + hardening).
