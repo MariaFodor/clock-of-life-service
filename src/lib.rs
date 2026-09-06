@@ -8,6 +8,7 @@
 pub mod auth;
 pub mod bundle;
 pub mod db;
+pub mod openapi;
 pub mod scoring;
 pub mod seed;
 
@@ -91,6 +92,7 @@ pub async fn init_state(bundle_dir: &str, database_url: &str) -> Result<Arc<AppS
 pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/health", get(health))
+        .route("/api/openapi.json", get(openapi_route))
         .route("/api/meta", get(meta))
         .route("/api/questions", get(questions_route))
         .route("/api/references", get(references_route))
@@ -191,6 +193,11 @@ fn input_hash(inputs: &serde_json::Value) -> String {
     let bytes = serde_json::to_vec(inputs).unwrap_or_default();
     let digest = Sha256::digest(&bytes);
     digest.iter().map(|b| format!("{b:02x}")).collect::<String>()[..16].to_string()
+}
+
+/// The OpenAPI 3.0 contract (public) — source for the web module's generated client.
+async fn openapi_route() -> Json<serde_json::Value> {
+    Json(openapi::openapi_doc())
 }
 
 async fn health(State(s): State<Arc<AppState>>) -> Json<serde_json::Value> {

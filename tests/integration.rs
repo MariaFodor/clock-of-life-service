@@ -758,6 +758,30 @@ fn aggregates_k_gating() {
     });
 }
 
+/// API-26: /api/openapi.json is a valid OpenAPI doc listing every route (drift guard).
+#[test]
+fn openapi_lists_all_routes() {
+    RT.block_on(async {
+    let s = state().await;
+    let doc = body_json(build_router(s.clone()).oneshot(get("/api/openapi.json")).await.unwrap()).await;
+    assert_eq!(doc["openapi"], "3.0.3");
+    assert!(doc["components"]["securitySchemes"]["bearerAuth"].is_object(), "bearer auth scheme declared");
+    let paths = doc["paths"].as_object().expect("paths object");
+    for p in [
+        "/health", "/api/meta", "/api/openapi.json", "/api/auth/register", "/api/auth/login",
+        "/api/questions", "/api/references", "/api/locations", "/api/aggregates",
+        "/api/estimate", "/api/recommendations", "/api/whatif", "/api/relocate",
+        "/api/calculations", "/api/answers", "/api/profile", "/api/profile/location",
+        "/api/account/export", "/api/account",
+        "/api/admin/audit", "/api/admin/questions", "/api/admin/questions/{code}",
+        "/api/admin/features/{key}", "/api/admin/rules", "/api/admin/rules/{code}",
+        "/api/admin/model/pin",
+    ] {
+        assert!(paths.contains_key(p), "OpenAPI spec is missing route {p}");
+    }
+    });
+}
+
 /// API-16: the admin surface is gated — 401 unauthenticated, 403 for a regular user, 200 for an admin.
 #[test]
 fn admin_gate() {
