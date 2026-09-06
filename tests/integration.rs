@@ -215,6 +215,40 @@ fn estimate_persists_and_history_reads_back() {
     });
 }
 
+/// API-05: /api/estimate carries a why[] breakdown + model provenance; context factors are never
+/// turned into recommendations.
+#[test]
+fn estimate_why_and_context_not_recommended() {
+    RT.block_on(async {
+    let s = state().await;
+    let high = json!({"country": "RO", "age": 55, "sex": "M", "smoke": 2, "pa_min": 0, "sleep": 7,
+                      "waist": 115, "diabetes": true});
+    let resp = build_router(s.clone()).oneshot(post("/api/estimate", high)).await.unwrap();
+    let est = body_json(resp).await;
+
+    // model provenance block.
+    assert_eq!(est["model"]["version"], "2.0.0");
+    assert!(est["model"]["algorithm"].as_str().is_some());
+    // why[] present, populated, each entry well-formed and sensibly signed.
+    let why = est["why"].as_array().expect("why[] present");
+    assert!(!why.is_empty(), "high-risk estimate has explanatory factors");
+    let smoking = why.iter().find(|w| w["key"] == "smk_current").expect("smoking in why[]");
+    assert!(smoking["delta_years"].as_f64().unwrap() < 0.0, "smoking costs years");
+    assert_eq!(smoking["evidence"], "strong");
+    assert_eq!(smoking["role"], "lever");
+    for w in why {
+        assert!(w["factor"].as_str().is_some() && w["citation"].as_str().is_some());
+    }
+
+    // A profile whose only deviation is a CONTEXT factor (cardiovascular history) gets no recommendation.
+    let context_only = json!({"country": "RO", "age": 40, "sex": "F", "smoke": 0, "pa_min": 2000,
+                              "sleep": 7, "waist": 78, "cvd_hx": true});
+    let resp = build_router(s.clone()).oneshot(post("/api/recommendations", context_only)).await.unwrap();
+    let recs = body_json(resp).await;
+    assert_eq!(recs.as_array().unwrap().len(), 0, "context factors are explained, never recommended");
+    });
+}
+
 /// Anonymous (unauthenticated) estimate still works — try-before-signup.
 #[test]
 fn anonymous_estimate_still_works() {
