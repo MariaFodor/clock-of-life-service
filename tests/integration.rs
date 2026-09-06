@@ -400,6 +400,30 @@ fn questions_and_profile() {
     });
 }
 
+/// API-09: why[] factors and recommendations carry openable study references inline.
+#[test]
+fn references_wired_into_why_and_recommendations() {
+    RT.block_on(async {
+    let s = state().await;
+    let high = json!({"country": "RO", "age": 55, "sex": "M", "smoke": 2, "pa_min": 0, "sleep": 7,
+                      "waist": 115, "diabetes": true});
+
+    let est = body_json(build_router(s.clone()).oneshot(post("/api/estimate", high.clone())).await.unwrap()).await;
+    let why = est["why"].as_array().unwrap();
+    let smoking = why.iter().find(|w| w["key"] == "smk_current").expect("smoking factor");
+    let refs = smoking["references"].as_array().expect("references array");
+    assert!(!refs.is_empty(), "smoking factor carries a reference");
+    // Reference is openable: a DOI or an internal review slug.
+    assert!(refs[0]["doi"].as_str().is_some() || refs[0]["review_slug"].as_str().is_some());
+
+    let recs = body_json(build_router(s.clone()).oneshot(post("/api/recommendations", high)).await.unwrap()).await;
+    for r in recs.as_array().unwrap() {
+        assert!(!r["references"].as_array().unwrap().is_empty(),
+            "recommendation {} cites at least one study", r["feature"]);
+    }
+    });
+}
+
 /// API-08: the references endpoint returns studies, filterable by feature/rule.
 #[test]
 fn references_endpoint() {

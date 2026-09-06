@@ -11,6 +11,7 @@ pub mod db;
 pub mod scoring;
 pub mod seed;
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -291,15 +292,35 @@ async fn login_route(
     }
 }
 
+/// A "Why?" factor plus the openable studies backing it.
+#[derive(Serialize)]
+struct WhyEntry {
+    #[serde(flatten)]
+    attribution: Attribution,
+    references: Vec<db::Study>,
+}
+
 #[derive(Serialize)]
 struct EstimateResponse {
     #[serde(flatten)]
     estimate: Estimate,
-    /// Per-factor "Why?" breakdown (total-effect year deltas + evidence).
-    why: Vec<Attribution>,
+    /// Per-factor "Why?" breakdown (total-effect year deltas + evidence + references).
+    why: Vec<WhyEntry>,
     /// Provenance of the model that produced this estimate (reproducibility).
     model: serde_json::Value,
     calculation_id: Uuid,
+}
+
+/// Group all feature→study links into a lookup by feature key (one query).
+async fn references_by_feature(
+    pool: &sqlx::postgres::PgPool,
+) -> Result<HashMap<String, Vec<db::Study>>, (StatusCode, String)> {
+    let rows = db::all_feature_studies(pool).await.map_err(db_err)?;
+    let mut map: HashMap<String, Vec<db::Study>> = HashMap::new();
+    for row in rows {
+        map.entry(row.feature_key).or_default().push(row.study);
+    }
+    Ok(map)
 }
 
 /// Answers -> Life-Clock estimate. Persists an append-only `calculation` snapshot to the caller's
@@ -310,7 +331,16 @@ async fn estimate_route(
     Json(profile): Json<Profile>,
 ) -> Result<Json<EstimateResponse>, (StatusCode, String)> {
     let est = estimate(&s.bundle, &profile).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
-    let why = attributions(&s.bundle, &profile).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let raw_why = attributions(&s.bundle, &profile).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    // Enrich each factor with its openable study references.
+    let refs = references_by_feature(&s.pool).await?;
+    let why: Vec<WhyEntry> = raw_why
+        .into_iter()
+        .map(|a| {
+            let references = refs.get(&a.key).cloned().unwrap_or_default();
+            WhyEntry { attribution: a, references }
+        })
+        .collect();
     let inputs = serde_json::to_value(&profile)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialize inputs: {e}")))?;
     let attributions_json = serde_json::to_value(&why)
@@ -352,6 +382,8 @@ struct Recommendation {
     impact_years: f64,
     /// Ranking score: impact_years × confidence(grade) × (priority/100).
     score: f64,
+    /// Openable studies backing this recommendation.
+    references: Vec<db::Study>,
 }
 
 /// Evaluate the seeded rules against a profile and return prioritized recommendations.
@@ -366,30 +398,32 @@ async fn recommendations_route(
         why.iter().map(|a| (a.key.as_str(), a.delta_years.abs())).collect();
 
     let rules = db::active_recommendation_rules(&s.pool).await.map_err(db_err)?;
-    let mut recs: Vec<Recommendation> = rules
-        .into_iter()
-        .filter(|r| eval_condition(&profile, &r.condition))
-        .map(|r| {
-            let impact_years = impact.get(r.feature_key.as_str()).copied().unwrap_or(0.0);
-            let confidence = match r.evidence_grade.as_deref() {
-                Some("strong") => 1.0,
-                Some("moderate") => 0.6,
-                Some("weak") => 0.3,
-                _ => 0.3,
-            };
-            let score = impact_years * confidence * (r.priority as f64 / 100.0);
-            Recommendation {
-                feature: r.feature_key,
-                message: r.message,
-                role: r.role,
-                priority: r.priority,
-                evidence_grade: r.evidence_grade,
-                evidence_citation: r.evidence_citation,
-                impact_years: (impact_years * 10.0).round() / 10.0,
-                score: (score * 100.0).round() / 100.0,
-            }
-        })
-        .collect();
+    let mut recs: Vec<Recommendation> = Vec::new();
+    for r in rules {
+        if !eval_condition(&profile, &r.condition) {
+            continue;
+        }
+        let impact_years = impact.get(r.feature_key.as_str()).copied().unwrap_or(0.0);
+        let confidence = match r.evidence_grade.as_deref() {
+            Some("strong") => 1.0,
+            Some("moderate") => 0.6,
+            Some("weak") => 0.3,
+            _ => 0.3,
+        };
+        let score = impact_years * confidence * (r.priority as f64 / 100.0);
+        let references = db::studies_for_rule(&s.pool, &r.code).await.map_err(db_err)?;
+        recs.push(Recommendation {
+            feature: r.feature_key,
+            message: r.message,
+            role: r.role,
+            priority: r.priority,
+            evidence_grade: r.evidence_grade,
+            evidence_citation: r.evidence_citation,
+            impact_years: (impact_years * 10.0).round() / 10.0,
+            score: (score * 100.0).round() / 100.0,
+            references,
+        });
+    }
     // Rank by score (impact × confidence × priority), then priority as a stable tiebreak.
     recs.sort_by(|a, b| {
         b.score
