@@ -128,6 +128,20 @@ fn seeds_are_reconciled() {
            AND NOT EXISTS (SELECT 1 FROM feature f WHERE f.key = q.feature_key)",
     ).fetch_one(&s.pool).await.unwrap();
     assert_eq!(dangling, 0, "no question points at a missing feature");
+
+    // Recommendation rules (API-02): all seeded, evidence-cited, referencing real features.
+    let rules: i64 = sqlx::query_scalar("SELECT count(*) FROM recommendation_rule WHERE active")
+        .fetch_one(&s.pool).await.unwrap();
+    assert_eq!(rules, 7, "7 recommendation rules seeded");
+    let uncited: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM recommendation_rule WHERE evidence_citation IS NULL OR evidence_citation = ''",
+    ).fetch_one(&s.pool).await.unwrap();
+    assert_eq!(uncited, 0, "every rule carries an evidence citation");
+    let rule_dangling: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM recommendation_rule r
+         WHERE NOT EXISTS (SELECT 1 FROM feature f WHERE f.key = r.feature_key)",
+    ).fetch_one(&s.pool).await.unwrap();
+    assert_eq!(rule_dangling, 0, "no rule points at a missing feature");
     });
 }
 

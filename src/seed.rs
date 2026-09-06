@@ -18,6 +18,7 @@ pub const ANON_PROFILE_ID: Uuid = uuid!("00000000-0000-0000-0000-000000000002");
 
 const FEATURES_JSON: &str = include_str!("../seeds/features.json");
 const QUESTIONS_JSON: &str = include_str!("../seeds/questions.json");
+const RULES_JSON: &str = include_str!("../seeds/recommendation_rules.json");
 
 #[derive(Deserialize)]
 struct FeatureSeed {
@@ -27,6 +28,16 @@ struct FeatureSeed {
     evidence_grade: String,
     citation: String,
     formula_note: String,
+}
+
+#[derive(Deserialize)]
+struct RuleSeed {
+    code: String,
+    feature_key: String,
+    condition: serde_json::Value,
+    priority: i32,
+    message: String,
+    evidence_citation: String,
 }
 
 #[derive(Deserialize)]
@@ -56,6 +67,7 @@ pub async fn reconcile(
 ) -> Result<SeedResult, sqlx::Error> {
     seed_features(pool).await?;
     seed_questions(pool).await?;
+    seed_recommendation_rules(pool).await?;
     let active_model_id = pin_model_version(pool, manifest, artifact_uri).await?;
     ensure_anonymous(pool).await?;
     Ok(SeedResult {
@@ -111,6 +123,31 @@ async fn seed_questions(pool: &PgPool) -> Result<(), sqlx::Error> {
         .bind(&q.feature_key)
         .bind(q.required)
         .bind(&q.evidence_citation)
+        .execute(pool)
+        .await?;
+    }
+    Ok(())
+}
+
+async fn seed_recommendation_rules(pool: &PgPool) -> Result<(), sqlx::Error> {
+    let rules: Vec<RuleSeed> =
+        serde_json::from_str(RULES_JSON).expect("recommendation_rules.json seed is valid");
+    for r in &rules {
+        sqlx::query(
+            "INSERT INTO recommendation_rule
+                 (code, feature_key, condition, message, priority, evidence_citation, active)
+             VALUES ($1, $2, $3, $4, $5, $6, true)
+             ON CONFLICT (code) DO UPDATE SET
+                 feature_key = EXCLUDED.feature_key, condition = EXCLUDED.condition,
+                 message = EXCLUDED.message, priority = EXCLUDED.priority,
+                 evidence_citation = EXCLUDED.evidence_citation, active = true",
+        )
+        .bind(&r.code)
+        .bind(&r.feature_key)
+        .bind(&r.condition)
+        .bind(&r.message)
+        .bind(r.priority)
+        .bind(&r.evidence_citation)
         .execute(pool)
         .await?;
     }
