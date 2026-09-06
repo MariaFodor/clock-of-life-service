@@ -8,10 +8,16 @@ mod scoring;
 
 use std::sync::Arc;
 
-use axum::{extract::State, routing::get, Json, Router};
+use axum::{
+    extract::State,
+    http::StatusCode,
+    routing::{get, post},
+    Json, Router,
+};
 use serde_json::json;
 
 use bundle::Bundle;
+use scoring::{estimate, Estimate, Profile};
 
 #[tokio::main]
 async fn main() {
@@ -30,6 +36,8 @@ async fn main() {
 
     let app = Router::new()
         .route("/health", get(health))
+        .route("/api/meta", get(meta))
+        .route("/api/estimate", post(estimate_route))
         .with_state(state);
 
     let addr = "127.0.0.1:8080";
@@ -44,4 +52,29 @@ async fn health(State(b): State<Arc<Bundle>>) -> Json<serde_json::Value> {
         "model_version": b.manifest.version,
         "countries": b.baselines.len(),
     }))
+}
+
+/// Active model version + provenance.
+async fn meta(State(b): State<Arc<Bundle>>) -> Json<serde_json::Value> {
+    let mut countries: Vec<&String> = b.baselines.keys().collect();
+    countries.sort();
+    Json(json!({
+        "model_version": b.manifest.version,
+        "algorithm": b.manifest.algorithm,
+        "countries": countries,
+        "assumptions": [
+            "statistical estimate, not a prediction or diagnosis",
+            "relative risk centred on the selected country's average person",
+        ],
+    }))
+}
+
+/// Answers -> Life-Clock estimate.
+async fn estimate_route(
+    State(b): State<Arc<Bundle>>,
+    Json(profile): Json<Profile>,
+) -> Result<Json<Estimate>, (StatusCode, String)> {
+    estimate(&b, &profile)
+        .map(Json)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))
 }
