@@ -34,7 +34,8 @@ cargo test
   loaded at startup; produced by `clock-of-life-model`.
 
 ## Endpoints
-- `GET /health` — liveness
+- `GET /health` — readiness (DB ping + bundle); 503 when the DB is unreachable
+- `GET /api/openapi.json` — OpenAPI 3.0 contract (source for the web client) *(public)*
 - `GET /api/meta` — active model version + provenance
 - `GET /api/questions` — the 24-question interview definition *(public)*
 - `GET /api/references` — evidence studies (openable DOIs / reviews); `?feature=<key>` or `?rule=<code>` *(public)*
@@ -50,15 +51,20 @@ cargo test
 - `GET /api/calculations` — the caller's calculation history *(auth required)*
 - `GET` / `POST /api/answers` — read / upsert the caller's questionnaire answers *(auth required)*
 - `GET /api/profile` — the caller's saved profile + answers; `POST /api/profile/location` sets the home location *(auth required)*
+- `GET /api/aggregates` — k-anonymized cohort distributions (gated at 20 distinct accounts) *(public)*
+- `GET /api/account/export` — GDPR export of all the caller's data; `DELETE /api/account` erases it; `PATCH /api/account` corrects it *(auth required)*
+- `GET /api/admin/audit` and `admin/*` mutations (questions/features/rules, model-pin) — every change writes an `audit_event` *(admin only)*
 
-Authenticated requests send `Authorization: Bearer <token>`.
+Any non-API path serves the built SPA (`WEB_DIST`, client-side-routing fallback to `index.html`).
+Authenticated requests send `Authorization: Bearer <token>`. Errors are JSON `{"error": "..."}`.
 
 ## Status
-Full results/evidence/environment API over a persist-and-read-back core. Scoring is Cox, country-aware
-(30 Eurostat baselines); age/sex resolve against the national life table, lifestyle/pathology against
-the fitted coefficients, and a location ENV term (PM2.5 + greenspace, RES-04). Estimates carry a per-
-factor "Why?" breakdown and prioritized recommendations, each linked to openable studies (DOIs /
-`analysed_papers` reviews). Auth is pseudonymous (argon2, JWT, email one-way-hashed — ADR-002);
-calculations/answers isolated per account. **Data caveat:** the Romanian PM2.5/NDVI location values are
-illustrative placeholders (RES-04) pending real sourced layers. **Next:** Bundle 6D (admin + audit),
-then 6E (privacy/GDPR + aggregates), 6F (OpenAPI + SPA + hardening).
+**Full launch-shaped API** over a persist-and-read-back core. Scoring is Cox, country-aware (30 Eurostat
+baselines) with a location ENV term (PM2.5 + greenspace, RES-04); estimates carry a per-factor "Why?"
+breakdown and prioritized recommendations, each linked to openable studies (DOIs / `analysed_papers`
+reviews). Accounts are pseudonymous (argon2, JWT, email one-way-hashed — ADR-002) with per-account
+isolation, GDPR export/erasure/correction, an admin surface with mandatory-citation audit trail, and
+k-anonymized aggregates. Platform: OpenAPI contract, SPA serving, structured JSON errors, request
+tracing, readiness health. **Data caveat:** the Romanian PM2.5/NDVI location values are illustrative
+placeholders (RES-04) pending real sourced layers. **Model residuals (MH-\*)** still gate launch-grade
+*numbers* (survey weights, coefficient tuning) — tracked in the model module.
