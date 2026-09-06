@@ -502,6 +502,38 @@ fn env_is_lever_only_in_relocate() {
     });
 }
 
+/// API-20: the audit log captures before/after snapshots + citation for every admin mutation.
+#[test]
+fn audit_captures_before_after_and_citation() {
+    RT.block_on(async {
+    let s = state().await;
+    let admin = register_admin(&s).await;
+    let code = format!("Qtest_{}_{}", std::process::id(), COUNTER_CODE.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+
+    // Create then update a question.
+    let create = json!({"code": code, "section": "Test", "text": "Original text?", "input_type": "number", "citation": "ops: create"});
+    assert_eq!(build_router(s.clone()).oneshot(post_auth("/api/admin/questions", create, &admin)).await.unwrap().status(), StatusCode::OK);
+    assert_eq!(build_router(s.clone()).oneshot(post_auth_put(&format!("/api/admin/questions/{code}"), json!({"text": "Edited text?", "citation": "ops: edit"}), &admin)).await.unwrap().status(), StatusCode::OK);
+
+    let audit = body_json(build_router(s.clone()).oneshot(get_auth("/api/admin/audit", &admin)).await.unwrap()).await;
+    let entries = audit.as_array().unwrap();
+
+    // Create entry: before is null, after is the row, citation present.
+    let created = entries.iter().find(|e| e["entity"] == "question" && e["entity_id"] == code && e["action"] == "create").expect("create audited");
+    assert!(created["before"].is_null(), "create has no before snapshot");
+    assert!(created["after"].is_object(), "create captures the new row");
+    assert!(!created["citation"].as_str().unwrap().is_empty());
+
+    // Update entry: before + after both captured, and the change is visible.
+    let updated = entries.iter().find(|e| e["entity"] == "question" && e["entity_id"] == code && e["action"] == "update").expect("update audited");
+    assert_eq!(updated["before"]["text"], "Original text?", "before snapshot captured");
+    assert_eq!(updated["after"]["text"], "Edited text?", "after snapshot captured");
+    assert!(!updated["citation"].as_str().unwrap().is_empty());
+
+    sqlx::query("DELETE FROM question WHERE code = $1").bind(&code).execute(&s.pool).await.unwrap();
+    });
+}
+
 /// API-19: admin can pin a model version; one-active enforced; audited; 403/404 guarded.
 #[test]
 fn admin_model_pin() {
