@@ -758,6 +758,36 @@ fn aggregates_k_gating() {
     });
 }
 
+/// API-30: the OpenAPI doc is generator-ready — every operation is well-formed and security refs resolve.
+#[test]
+fn openapi_spec_is_generator_ready() {
+    RT.block_on(async {
+    let s = state().await;
+    let doc = body_json(build_router(s.clone()).oneshot(get("/api/openapi.json")).await.unwrap()).await;
+    assert_eq!(doc["openapi"], "3.0.3");
+    assert!(doc["info"]["title"].as_str().is_some() && doc["info"]["version"].as_str().is_some());
+    assert!(doc["servers"].as_array().map(|a| !a.is_empty()).unwrap_or(false), "servers present");
+    let has_bearer = doc["components"]["securitySchemes"]["bearerAuth"].is_object();
+    assert!(has_bearer, "bearerAuth scheme defined");
+
+    let mut op_count = 0;
+    for (path, item) in doc["paths"].as_object().expect("paths") {
+        for method in ["get", "post", "put", "delete", "patch"] {
+            let op = &item[method];
+            if op.is_null() { continue; }
+            op_count += 1;
+            assert!(op["summary"].as_str().is_some(), "{method} {path} has a summary");
+            assert!(op["responses"]["200"].is_object(), "{method} {path} documents a 200");
+            // Any operation that declares security must reference the defined bearerAuth scheme.
+            if let Some(sec) = op.get("security").and_then(|v| v.as_array()) {
+                assert!(sec.iter().any(|s| s.get("bearerAuth").is_some()), "{method} {path} security refs bearerAuth");
+            }
+        }
+    }
+    assert!(op_count >= 26, "all operations present (got {op_count})");
+    });
+}
+
 /// API-26: /api/openapi.json is a valid OpenAPI doc listing every route (drift guard).
 #[test]
 fn openapi_lists_all_routes() {
