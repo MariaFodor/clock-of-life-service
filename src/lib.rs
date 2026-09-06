@@ -5,6 +5,7 @@
 //! The binary in `main.rs` is a thin wrapper; the router is exposed here so integration tests can drive
 //! it in-process.
 
+pub mod auth;
 pub mod bundle;
 pub mod db;
 pub mod scoring;
