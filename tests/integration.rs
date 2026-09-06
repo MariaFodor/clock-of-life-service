@@ -400,6 +400,39 @@ fn questions_and_profile() {
     });
 }
 
+/// API-10: evidence-traceability invariants — every factor/rule resolves to an openable study.
+#[test]
+fn every_factor_and_rule_resolves_to_a_study() {
+    RT.block_on(async {
+    let s = state().await;
+    let feature_without_study: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM feature f WHERE f.active
+           AND NOT EXISTS (SELECT 1 FROM feature_study fs WHERE fs.feature_key = f.key)",
+    ).fetch_one(&s.pool).await.unwrap();
+    assert_eq!(feature_without_study, 0, "every kept factor is backed by a study");
+
+    let rule_without_study: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM recommendation_rule r WHERE r.active
+           AND NOT EXISTS (SELECT 1 FROM rule_study rs WHERE rs.rule_code = r.code)",
+    ).fetch_one(&s.pool).await.unwrap();
+    assert_eq!(rule_without_study, 0, "every rule is backed by a study");
+
+    // Every study is openable (a DOI or an internal review), so a citation is never a dead end.
+    let unopenable: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM study
+         WHERE (doi IS NULL OR doi = '') AND (review_slug IS NULL OR review_slug = '')",
+    ).fetch_one(&s.pool).await.unwrap();
+    assert_eq!(unopenable, 0, "every study has an openable link");
+
+    // Link integrity: no link references a missing study.
+    let dangling: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM feature_study fs
+           WHERE NOT EXISTS (SELECT 1 FROM study s WHERE s.code = fs.study_code)",
+    ).fetch_one(&s.pool).await.unwrap();
+    assert_eq!(dangling, 0, "no feature_study link points at a missing study");
+    });
+}
+
 /// API-09: why[] factors and recommendations carry openable study references inline.
 #[test]
 fn references_wired_into_why_and_recommendations() {
