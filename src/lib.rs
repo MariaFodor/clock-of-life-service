@@ -150,6 +150,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             tower_http::services::ServeDir::new(&state.web_dist)
                 .fallback(tower_http::services::ServeFile::new(format!("{}/index.html", state.web_dist))),
         )
+        // Per-request tracing spans (method, path, status, latency) via the `tracing` subscriber.
+        .layer(tower_http::trace::TraceLayer::new_for_http())
         .with_state(state)
 }
 
@@ -233,12 +235,19 @@ async fn openapi_route() -> Json<serde_json::Value> {
     Json(openapi::openapi_doc())
 }
 
-async fn health(State(s): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    Json(json!({
-        "status": "ok",
-        "model_version": s.bundle.manifest.version,
-        "countries": s.bundle.baselines.len(),
-    }))
+/// Readiness: 200 when the DB is reachable and the bundle is loaded; 503 (degraded) otherwise.
+async fn health(State(s): State<Arc<AppState>>) -> (StatusCode, Json<serde_json::Value>) {
+    let db_up = db::ping(&s.pool).await.is_ok();
+    let status = if db_up { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE };
+    (
+        status,
+        Json(json!({
+            "status": if db_up { "ok" } else { "degraded" },
+            "db": if db_up { "up" } else { "down" },
+            "model_version": s.bundle.manifest.version,
+            "countries": s.bundle.baselines.len(),
+        })),
+    )
 }
 
 /// Active model version + provenance.

@@ -840,6 +840,20 @@ fn errors_are_structured_json() {
     });
 }
 
+/// API-29: /health is a readiness check reporting DB + bundle status.
+#[test]
+fn health_readiness() {
+    RT.block_on(async {
+    let s = state().await;
+    let resp = build_router(s.clone()).oneshot(get("/health")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+    assert_eq!(body["status"], "ok");
+    assert_eq!(body["db"], "up", "readiness confirms the database is reachable");
+    assert!(body["countries"].as_u64().unwrap() > 0, "bundle loaded");
+    });
+}
+
 /// API-16: the admin surface is gated — 401 unauthenticated, 403 for a regular user, 200 for an admin.
 #[test]
 fn admin_gate() {

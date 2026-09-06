@@ -499,6 +499,12 @@ pub async fn aggregate_by_country(pool: &PgPool) -> Result<Vec<CountryAggregate>
     .await
 }
 
+/// Liveness/readiness ping — confirms the pool can reach the database.
+pub async fn ping(pool: &PgPool) -> Result<(), sqlx::Error> {
+    sqlx::query("SELECT 1").execute(pool).await?;
+    Ok(())
+}
+
 /// Whether an account has the admin flag.
 pub async fn is_admin(pool: &PgPool, account_id: Uuid) -> Result<bool, sqlx::Error> {
     Ok(sqlx::query_scalar::<_, bool>("SELECT is_admin FROM account WHERE id = $1")

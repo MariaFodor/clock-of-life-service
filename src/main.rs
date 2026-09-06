@@ -7,6 +7,14 @@ use clock_of_life_service::{build_router, default_database_url, init_state};
 
 #[tokio::main]
 async fn main() {
+    // Structured logging + request tracing (RUST_LOG controls verbosity; default info).
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "info,tower_http=info".into()),
+        )
+        .init();
+
     let dir = std::env::var("CLOCK_BUNDLE").unwrap_or_else(|_| "bundle/model-v2.0.0".to_string());
     let database_url = default_database_url();
 
