@@ -77,7 +77,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 }
 
 fn db_err(e: sqlx::Error) -> (StatusCode, String) {
-    (StatusCode::INTERNAL_SERVER_ERROR, format!("database error: {e}"))
+    // Keep the detail server-side; return a generic message so internal query/schema detail never
+    // reaches the client.
+    eprintln!("database error: {e}");
+    (StatusCode::INTERNAL_SERVER_ERROR, "internal error".to_string())
 }
 
 /// First 16 hex chars of the SHA-256 of the serialized inputs (a stable snapshot fingerprint).
