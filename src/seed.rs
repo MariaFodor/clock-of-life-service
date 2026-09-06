@@ -19,6 +19,7 @@ pub const ANON_PROFILE_ID: Uuid = uuid!("00000000-0000-0000-0000-000000000002");
 const FEATURES_JSON: &str = include_str!("../seeds/features.json");
 const QUESTIONS_JSON: &str = include_str!("../seeds/questions.json");
 const RULES_JSON: &str = include_str!("../seeds/recommendation_rules.json");
+const STUDIES_JSON: &str = include_str!("../seeds/studies.json");
 
 #[derive(Deserialize)]
 struct FeatureSeed {
@@ -28,6 +29,38 @@ struct FeatureSeed {
     evidence_grade: String,
     citation: String,
     formula_note: String,
+}
+
+#[derive(Deserialize)]
+struct StudySeed {
+    code: String,
+    title: String,
+    authors: Option<String>,
+    year: Option<i32>,
+    venue: Option<String>,
+    doi: Option<String>,
+    url: Option<String>,
+    review_slug: Option<String>,
+    evidence_grade: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct FeatureLink {
+    feature_key: String,
+    study_code: String,
+}
+
+#[derive(Deserialize)]
+struct RuleLink {
+    rule_code: String,
+    study_code: String,
+}
+
+#[derive(Deserialize)]
+struct StudySeedFile {
+    studies: Vec<StudySeed>,
+    feature_studies: Vec<FeatureLink>,
+    rule_studies: Vec<RuleLink>,
 }
 
 #[derive(Deserialize)]
@@ -68,6 +101,7 @@ pub async fn reconcile(
     seed_features(pool).await?;
     seed_questions(pool).await?;
     seed_recommendation_rules(pool).await?;
+    seed_studies(pool).await?;
     let active_model_id = pin_model_version(pool, manifest, artifact_uri).await?;
     ensure_anonymous(pool).await?;
     Ok(SeedResult {
@@ -148,6 +182,47 @@ async fn seed_recommendation_rules(pool: &PgPool) -> Result<(), sqlx::Error> {
         .bind(&r.message)
         .bind(r.priority)
         .bind(&r.evidence_citation)
+        .execute(pool)
+        .await?;
+    }
+    Ok(())
+}
+
+/// Seed the study/reference store and rebuild its link tables from the desired state.
+async fn seed_studies(pool: &PgPool) -> Result<(), sqlx::Error> {
+    let data: StudySeedFile =
+        serde_json::from_str(STUDIES_JSON).expect("studies.json seed is valid");
+    for s in &data.studies {
+        sqlx::query(
+            "INSERT INTO study (code, title, authors, year, venue, doi, url, review_slug, evidence_grade)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+             ON CONFLICT (code) DO UPDATE SET
+                 title = EXCLUDED.title, authors = EXCLUDED.authors, year = EXCLUDED.year,
+                 venue = EXCLUDED.venue, doi = EXCLUDED.doi, url = EXCLUDED.url,
+                 review_slug = EXCLUDED.review_slug, evidence_grade = EXCLUDED.evidence_grade",
+        )
+        .bind(&s.code).bind(&s.title).bind(&s.authors).bind(s.year).bind(&s.venue)
+        .bind(&s.doi).bind(&s.url).bind(&s.review_slug).bind(&s.evidence_grade)
+        .execute(pool)
+        .await?;
+    }
+    // Link tables are fully derived from the seed — rebuild them so removals are reflected.
+    sqlx::query("DELETE FROM feature_study").execute(pool).await?;
+    sqlx::query("DELETE FROM rule_study").execute(pool).await?;
+    for l in &data.feature_studies {
+        sqlx::query(
+            "INSERT INTO feature_study (feature_key, study_code) VALUES ($1, $2)
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(&l.feature_key).bind(&l.study_code)
+        .execute(pool)
+        .await?;
+    }
+    for l in &data.rule_studies {
+        sqlx::query(
+            "INSERT INTO rule_study (rule_code, study_code) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+        )
+        .bind(&l.rule_code).bind(&l.study_code)
         .execute(pool)
         .await?;
     }
