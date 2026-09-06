@@ -95,6 +95,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/questions", get(questions_route))
         .route("/api/references", get(references_route))
         .route("/api/locations", get(locations_route))
+        .route("/api/aggregates", get(aggregates_route))
         .route("/api/auth/register", post(register_route))
         .route("/api/auth/login", post(login_route))
         .route("/api/estimate", post(estimate_route))
@@ -213,6 +214,27 @@ async fn meta(State(s): State<Arc<AppState>>) -> Json<serde_json::Value> {
             "relative risk centred on the selected country's average person",
         ],
     }))
+}
+
+/// Cohort aggregates (public): estimate-years distribution + per-country summary, each gated at k=20 so
+/// no individual is exposed. Never a claim about observed mortality (the platform never observes deaths).
+async fn aggregates_route(
+    State(s): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let overall = db::aggregate_overall(&s.pool).await.map_err(db_err)?;
+    let distribution = if overall.n >= db::AGGREGATE_MIN_K {
+        json!({"mean": overall.mean, "p10": overall.p10, "p50": overall.p50, "p90": overall.p90})
+    } else {
+        serde_json::Value::Null // suppressed: cohort below k
+    };
+    let by_country = db::aggregate_by_country(&s.pool).await.map_err(db_err)?;
+    Ok(Json(json!({
+        "n": overall.n,
+        "min_group": db::AGGREGATE_MIN_K,
+        "estimate_years": distribution,
+        "by_country": by_country,
+        "note": "aggregate scenario estimates only, k-anonymized; not observed mortality",
+    })))
 }
 
 /// All known locations with their PM2.5 / greenspace (public — powers the location picker + compare).

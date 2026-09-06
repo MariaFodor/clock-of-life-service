@@ -699,6 +699,45 @@ fn rectification() {
     });
 }
 
+/// API-24: aggregates report cohort distributions, k-gated (a group needs ≥20 to appear).
+#[test]
+fn aggregates_k_gating() {
+    RT.block_on(async {
+    let s = state().await;
+    // k counts DISTINCT ACCOUNTS: seed 22 accounts each with a ZZ calc (>= k) and 3 for YY (< k).
+    let seed = |country: &'static str, n: i32| {
+        let pool = s.pool.clone();
+        async move {
+            // One fresh account per record, tagged by email_hash for cleanup.
+            sqlx::query(
+                "INSERT INTO account (id, email_hash, password_hash)
+                 SELECT gen_random_uuid(), 'aggtest_'||$1||'_'||g, '!disabled' FROM generate_series(1,$2) g",
+            ).bind(country).bind(n).execute(&pool).await.unwrap();
+            sqlx::query(
+                "INSERT INTO calculation (account_id, model_version_id, input_hash, inputs, estimate_years,
+                     interval_low, interval_high, reaches_age, relative_risk, attributions)
+                 SELECT a.id, (SELECT id FROM model_version WHERE is_active LIMIT 1),
+                        'agg', jsonb_build_object('country',$1), 40, 36, 44, 80, 1.0, '[]'::jsonb
+                 FROM account a WHERE a.email_hash LIKE 'aggtest_'||$1||'_%'",
+            ).bind(country).execute(&pool).await.unwrap();
+        }
+    };
+    seed("ZZ", 22).await;
+    seed("YY", 3).await;
+
+    let agg = body_json(build_router(s.clone()).oneshot(get("/api/aggregates")).await.unwrap()).await;
+    assert!(agg["n"].as_i64().unwrap() >= 22, "n counts distinct accounts");
+    assert!(!agg["estimate_years"].is_null(), "distribution present when cohort >= k");
+    let countries: Vec<&str> = agg["by_country"].as_array().unwrap().iter()
+        .filter_map(|c| c["country"].as_str()).collect();
+    assert!(countries.contains(&"ZZ"), "ZZ (n>=20) is reported");
+    assert!(!countries.contains(&"YY"), "YY (n<20) is suppressed");
+
+    // Clean up seeded accounts (cascades their calculations).
+    sqlx::query("DELETE FROM account WHERE email_hash LIKE 'aggtest_%'").execute(&s.pool).await.unwrap();
+    });
+}
+
 /// API-16: the admin surface is gated — 401 unauthenticated, 403 for a regular user, 200 for an admin.
 #[test]
 fn admin_gate() {

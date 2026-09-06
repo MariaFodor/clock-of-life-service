@@ -450,6 +450,55 @@ pub async fn admin_pin_model(
     Ok(Some(after))
 }
 
+/// Minimum number of DISTINCT ACCOUNTS for any reported aggregate (k-anonymity; k counts people, not
+/// calculations, so one prolific user can't form a "cohort").
+pub const AGGREGATE_MIN_K: i64 = 20;
+
+/// Overall estimate-years distribution; `n` is the number of distinct accounts.
+#[derive(sqlx::FromRow)]
+pub struct AggregateOverall {
+    pub n: i64,
+    pub mean: Option<f64>,
+    pub p10: Option<f64>,
+    pub p50: Option<f64>,
+    pub p90: Option<f64>,
+}
+
+pub async fn aggregate_overall(pool: &PgPool) -> Result<AggregateOverall, sqlx::Error> {
+    sqlx::query_as::<_, AggregateOverall>(
+        "SELECT count(DISTINCT account_id) AS n,
+                avg(estimate_years)::float8 AS mean,
+                percentile_cont(0.1) WITHIN GROUP (ORDER BY estimate_years)::float8 AS p10,
+                percentile_cont(0.5) WITHIN GROUP (ORDER BY estimate_years)::float8 AS p50,
+                percentile_cont(0.9) WITHIN GROUP (ORDER BY estimate_years)::float8 AS p90
+         FROM calculation",
+    )
+    .fetch_one(pool)
+    .await
+}
+
+/// Per-country cohort summary, suppressed below the k threshold.
+#[derive(sqlx::FromRow, Serialize)]
+pub struct CountryAggregate {
+    pub country: Option<String>,
+    pub n: i64,
+    pub mean_years: Option<f64>,
+}
+
+pub async fn aggregate_by_country(pool: &PgPool) -> Result<Vec<CountryAggregate>, sqlx::Error> {
+    sqlx::query_as::<_, CountryAggregate>(
+        "SELECT inputs->>'country' AS country, count(DISTINCT account_id) AS n,
+                avg(estimate_years)::float8 AS mean_years
+         FROM calculation
+         GROUP BY inputs->>'country'
+         HAVING count(DISTINCT account_id) >= $1
+         ORDER BY inputs->>'country'",
+    )
+    .bind(AGGREGATE_MIN_K)
+    .fetch_all(pool)
+    .await
+}
+
 /// Whether an account has the admin flag.
 pub async fn is_admin(pool: &PgPool, account_id: Uuid) -> Result<bool, sqlx::Error> {
     Ok(sqlx::query_scalar::<_, bool>("SELECT is_admin FROM account WHERE id = $1")
