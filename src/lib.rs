@@ -91,12 +91,14 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/api/meta", get(meta))
+        .route("/api/questions", get(questions_route))
         .route("/api/auth/register", post(register_route))
         .route("/api/auth/login", post(login_route))
         .route("/api/estimate", post(estimate_route))
         .route("/api/recommendations", post(recommendations_route))
         .route("/api/whatif", post(whatif_route))
         .route("/api/calculations", get(calculations_route))
+        .route("/api/profile", get(profile_route))
         .route("/api/answers", get(get_answers_route).post(post_answers_route))
         .with_state(state)
 }
@@ -177,6 +179,14 @@ async fn meta(State(s): State<Arc<AppState>>) -> Json<serde_json::Value> {
             "relative risk centred on the selected country's average person",
         ],
     }))
+}
+
+/// The interview definition (public — the frontend renders onboarding before sign-up).
+async fn questions_route(
+    State(s): State<Arc<AppState>>,
+) -> Result<Json<Vec<db::QuestionRow>>, (StatusCode, String)> {
+    let rows = db::list_questions(&s.pool).await.map_err(db_err)?;
+    Ok(Json(rows))
 }
 
 /// A valid argon2 hash of a throwaway value, used to equalize login timing when no account matches
@@ -428,6 +438,24 @@ async fn calculations_route(
         .await
         .map_err(db_err)?;
     Ok(Json(rows))
+}
+
+/// The authenticated caller's saved profile: metadata + current answers.
+async fn profile_route(
+    State(s): State<Arc<AppState>>,
+    Auth(account): Auth,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let profile = db::get_profile(&s.pool, account)
+        .await
+        .map_err(db_err)?
+        .ok_or((StatusCode::INTERNAL_SERVER_ERROR, "no profile for account".to_string()))?;
+    let answers = db::list_answers(&s.pool, profile.id).await.map_err(db_err)?;
+    Ok(Json(json!({
+        "profile_id": profile.id,
+        "home_location_id": profile.home_location_id,
+        "updated_at": profile.updated_at,
+        "answers": answers,
+    })))
 }
 
 /// Resolve the caller's profile id (each account has exactly one profile).

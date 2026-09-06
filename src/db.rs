@@ -154,6 +154,51 @@ pub async fn list_calculations(
     .await
 }
 
+/// One question of the interview definition (for rendering onboarding).
+#[derive(Serialize, sqlx::FromRow)]
+pub struct QuestionRow {
+    pub code: String,
+    pub version: i32,
+    pub section: String,
+    pub text: String,
+    pub input_type: String,
+    pub options: Option<Value>,
+    pub feature_key: Option<String>,
+    pub required: bool,
+    pub evidence_citation: Option<String>,
+}
+
+/// The active interview definition, ordered by the question's numeric code (Q1…Q24).
+pub async fn list_questions(pool: &PgPool) -> Result<Vec<QuestionRow>, sqlx::Error> {
+    sqlx::query_as::<_, QuestionRow>(
+        "SELECT code, version, section, text, input_type, options, feature_key, required,
+                evidence_citation
+         FROM question
+         WHERE active
+         ORDER BY (regexp_replace(code, '[^0-9]', '', 'g'))::int",
+    )
+    .fetch_all(pool)
+    .await
+}
+
+/// A profile's metadata (its answers are read separately via `list_answers`).
+#[derive(Serialize, sqlx::FromRow)]
+pub struct ProfileRow {
+    pub id: Uuid,
+    pub home_location_id: Option<Uuid>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// The profile row owned by an account.
+pub async fn get_profile(pool: &PgPool, account_id: Uuid) -> Result<Option<ProfileRow>, sqlx::Error> {
+    sqlx::query_as::<_, ProfileRow>(
+        "SELECT id, home_location_id, updated_at FROM profile WHERE account_id = $1",
+    )
+    .bind(account_id)
+    .fetch_optional(pool)
+    .await
+}
+
 /// An active recommendation rule joined to its feature's role + evidence grade.
 #[derive(sqlx::FromRow)]
 pub struct RuleRow {

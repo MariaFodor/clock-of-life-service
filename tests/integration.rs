@@ -337,6 +337,35 @@ fn answers_upsert_and_readback() {
     });
 }
 
+/// API-04: the interview definition is public and numerically ordered; profile is auth-scoped.
+#[test]
+fn questions_and_profile() {
+    RT.block_on(async {
+    let s = state().await;
+    // Questions: public (no auth), all 24, ordered Q1..Q24 by numeric code.
+    let resp = build_router(s.clone()).oneshot(get("/api/questions")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let qs = body_json(resp).await;
+    let arr = qs.as_array().unwrap();
+    assert_eq!(arr.len(), 24, "24 questions served");
+    assert_eq!(arr[0]["code"], "Q1_age");
+    assert_eq!(arr[9]["code"], "Q10_sedentary", "numeric order (Q10 after Q9, not after Q1)");
+
+    // Profile: requires auth, returns the caller's saved answers.
+    assert_eq!(build_router(s.clone()).oneshot(get("/api/profile")).await.unwrap().status(), StatusCode::UNAUTHORIZED);
+    let token = register_token(&s).await;
+    build_router(s.clone())
+        .oneshot(post_auth("/api/answers", json!({"answers": [{"question_code": "Q11_sleep", "value": "7-8"}]}), &token))
+        .await.unwrap();
+    let resp = build_router(s.clone()).oneshot(get_auth("/api/profile", &token)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let profile = body_json(resp).await;
+    assert!(profile["profile_id"].as_str().is_some());
+    let answers = profile["answers"].as_array().unwrap();
+    assert!(answers.iter().any(|a| a["question_code"] == "Q11_sleep" && a["value"] == "7-8"));
+    });
+}
+
 /// DB4: an unknown question code is a 400, not a 500.
 #[test]
 fn unknown_question_code_is_bad_request() {
