@@ -699,6 +699,26 @@ fn rectification() {
     });
 }
 
+/// API-25: aggregates expose no individual data — only counts/means/percentiles, never ids or raw rows.
+#[test]
+fn aggregates_expose_no_individual_data() {
+    RT.block_on(async {
+    let s = state().await;
+    let agg = body_json(build_router(s.clone()).oneshot(get("/api/aggregates")).await.unwrap()).await;
+    // No account ids or raw input payloads anywhere in the serialized response.
+    let text = agg.to_string();
+    assert!(!text.contains("account_id"), "no account ids in aggregates");
+    assert!(!text.contains("input_hash"), "no per-calculation identifiers in aggregates");
+    // Each per-country row exposes only the safe aggregate keys.
+    for c in agg["by_country"].as_array().unwrap() {
+        let keys: Vec<&str> = c.as_object().unwrap().keys().map(|k| k.as_str()).collect();
+        for k in &keys {
+            assert!(matches!(*k, "country" | "n" | "mean_years"), "unexpected aggregate key: {k}");
+        }
+    }
+    });
+}
+
 /// API-24: aggregates report cohort distributions, k-gated (a group needs ≥20 to appear).
 #[test]
 fn aggregates_k_gating() {
