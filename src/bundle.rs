@@ -44,6 +44,11 @@ pub struct Manifest {
     pub algorithm: String,
     pub countries: Vec<String>,
     pub checksums: HashMap<String, String>,
+    /// Provenance used to seed the `model_version` row (optional — absent in older bundles).
+    #[serde(default)]
+    pub reference_population: Option<String>,
+    #[serde(default)]
+    pub data_as_of: Option<String>,
 }
 
 pub struct Bundle {

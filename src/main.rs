@@ -1,97 +1,29 @@
-//! The Clock of Life — Rust scoring service.
+//! The Clock of Life — Rust scoring service (binary).
 //!
-//! v1 is a stateless scoring service: it loads a model artifact bundle and serves estimates. Database
-//! persistence (accounts, calculation snapshots, admin) is a later slice, gated on PostgreSQL.
+//! Thin wrapper: load the bundle, connect + migrate + reconcile the database, then serve. The router and
+//! all logic live in the library crate so integration tests can drive them in-process.
 
-mod bundle;
-mod scoring;
-
-use std::sync::Arc;
-
-use axum::{
-    extract::State,
-    http::StatusCode,
-    routing::{get, post},
-    Json, Router,
-};
-use serde_json::json;
-
-use bundle::Bundle;
-use scoring::{estimate, whatif, Estimate, Profile, WhatIf, WhatIfChanges};
+use clock_of_life_service::{build_router, default_database_url, init_state};
 
 #[tokio::main]
 async fn main() {
     let dir = std::env::var("CLOCK_BUNDLE").unwrap_or_else(|_| "bundle/model-v2.0.0".to_string());
-    let b = Bundle::load(std::path::Path::new(&dir)).unwrap_or_else(|e| {
-        eprintln!("failed to load model bundle from {dir}: {e}");
+    let database_url = default_database_url();
+
+    let state = init_state(&dir, &database_url).await.unwrap_or_else(|e| {
+        eprintln!("startup failed: {e}");
         std::process::exit(1);
     });
     println!(
-        "loaded model v{} ({}) — {} country baselines, checksums OK",
-        b.manifest.version,
-        b.manifest.algorithm,
-        b.baselines.len()
+        "loaded model v{} ({}) — {} country baselines; db connected, migrated, reconciled",
+        state.bundle.manifest.version,
+        state.bundle.manifest.algorithm,
+        state.bundle.baselines.len()
     );
-    let state = Arc::new(b);
 
-    let app = Router::new()
-        .route("/health", get(health))
-        .route("/api/meta", get(meta))
-        .route("/api/estimate", post(estimate_route))
-        .route("/api/whatif", post(whatif_route))
-        .with_state(state);
-
+    let app = build_router(state);
     let addr = "127.0.0.1:8080";
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     println!("clock-of-life-service listening on http://{addr}");
     axum::serve(listener, app).await.unwrap();
-}
-
-async fn health(State(b): State<Arc<Bundle>>) -> Json<serde_json::Value> {
-    Json(json!({
-        "status": "ok",
-        "model_version": b.manifest.version,
-        "countries": b.baselines.len(),
-    }))
-}
-
-/// Active model version + provenance.
-async fn meta(State(b): State<Arc<Bundle>>) -> Json<serde_json::Value> {
-    let mut countries: Vec<&String> = b.baselines.keys().collect();
-    countries.sort();
-    Json(json!({
-        "model_version": b.manifest.version,
-        "algorithm": b.manifest.algorithm,
-        "countries": countries,
-        "assumptions": [
-            "statistical estimate, not a prediction or diagnosis",
-            "relative risk centred on the selected country's average person",
-        ],
-    }))
-}
-
-/// Answers -> Life-Clock estimate.
-async fn estimate_route(
-    State(b): State<Arc<Bundle>>,
-    Json(profile): Json<Profile>,
-) -> Result<Json<Estimate>, (StatusCode, String)> {
-    estimate(&b, &profile)
-        .map(Json)
-        .map_err(|e| (StatusCode::BAD_REQUEST, e))
-}
-
-#[derive(serde::Deserialize)]
-struct WhatIfRequest {
-    base: Profile,
-    changes: WhatIfChanges,
-}
-
-/// Explore a lifestyle change (non-persisted overlay).
-async fn whatif_route(
-    State(b): State<Arc<Bundle>>,
-    Json(req): Json<WhatIfRequest>,
-) -> Result<Json<WhatIf>, (StatusCode, String)> {
-    whatif(&b, &req.base, &req.changes)
-        .map(Json)
-        .map_err(|e| (StatusCode::BAD_REQUEST, e))
 }

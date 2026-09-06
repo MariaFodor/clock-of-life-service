@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::bundle::{Baseline, Bundle, Coefficients};
 
 /// Raw self-reported inputs (cohort-fitted features). Literature levers (diet/alcohol/…) join later.
-#[derive(Deserialize, Clone)]
+#[derive(Deserialize, Serialize, Clone)]
 pub struct Profile {
     pub country: String,
     pub age: f64,
@@ -158,7 +158,7 @@ pub fn estimate(bundle: &Bundle, p: &Profile) -> Result<Estimate, String> {
 fn round1(x: f64) -> f64 { (x * 10.0).round() / 10.0 }
 
 /// A lifestyle change to explore. Only modifiable levers may change (manage/context/baseline are fixed).
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct WhatIfChanges {
     pub smoke: Option<u8>,
     pub pa_min: Option<f64>,
