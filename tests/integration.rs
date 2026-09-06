@@ -457,6 +457,31 @@ fn references_wired_into_why_and_recommendations() {
     });
 }
 
+/// API-15: ENV is a lever only inside relocate — it is never recommended and never a why[] factor,
+/// even for a user living in a polluted location.
+#[test]
+fn env_is_lever_only_in_relocate() {
+    RT.block_on(async {
+    let s = state().await;
+    // A profile in dirty air (Bucharest-like), otherwise healthy so no other rule fires.
+    let dirty = json!({"country": "RO", "age": 45, "sex": "M", "smoke": 0, "pa_min": 2000, "sleep": 7,
+                       "waist": 80, "pm25": 19.0, "ndvi": 0.35});
+
+    // Recommendations never mention env (context, not a lever) — healthy lifestyle → none at all.
+    let recs = body_json(build_router(s.clone()).oneshot(post("/api/recommendations", dirty.clone())).await.unwrap()).await;
+    assert!(recs.as_array().unwrap().iter().all(|r| r["feature"] != "env"), "env is never recommended");
+
+    // why[] carries no env factor (env is a context term outside the attribution set).
+    let est = body_json(build_router(s.clone()).oneshot(post("/api/estimate", dirty.clone())).await.unwrap()).await;
+    assert!(est["why"].as_array().unwrap().iter().all(|w| w["key"] != "env"), "env is not a why[] factor");
+
+    // But relocation DOES act on it.
+    let rel = body_json(build_router(s.clone())
+        .oneshot(post("/api/relocate", json!({"base": dirty, "to": "Rural (national)"}))).await.unwrap()).await;
+    assert!(rel["delta_years"].as_f64().unwrap() > 0.0, "moving to cleaner air adds years (env as lever)");
+    });
+}
+
 /// API-14: relocate compares locations and explains air vs greenspace; symmetric; 404 on unknown.
 #[test]
 fn relocate_compares_locations() {
