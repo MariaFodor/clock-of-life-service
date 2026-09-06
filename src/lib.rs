@@ -15,7 +15,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use axum::{
-    extract::State,
+    extract::{Query, State},
     http::StatusCode,
     routing::{get, post},
     Json, Router,
@@ -92,6 +92,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/health", get(health))
         .route("/api/meta", get(meta))
         .route("/api/questions", get(questions_route))
+        .route("/api/references", get(references_route))
         .route("/api/auth/register", post(register_route))
         .route("/api/auth/login", post(login_route))
         .route("/api/estimate", post(estimate_route))
@@ -179,6 +180,26 @@ async fn meta(State(s): State<Arc<AppState>>) -> Json<serde_json::Value> {
             "relative risk centred on the selected country's average person",
         ],
     }))
+}
+
+#[derive(Deserialize)]
+struct RefQuery {
+    feature: Option<String>,
+    rule: Option<String>,
+}
+
+/// Evidence references (public). All studies, or those linked to a `?feature=<key>` or `?rule=<code>`.
+async fn references_route(
+    State(s): State<Arc<AppState>>,
+    Query(q): Query<RefQuery>,
+) -> Result<Json<Vec<db::Study>>, (StatusCode, String)> {
+    let studies = match (q.feature.as_deref(), q.rule.as_deref()) {
+        (Some(feature), _) => db::studies_for_feature(&s.pool, feature).await,
+        (None, Some(rule)) => db::studies_for_rule(&s.pool, rule).await,
+        (None, None) => db::list_studies(&s.pool).await,
+    }
+    .map_err(db_err)?;
+    Ok(Json(studies))
 }
 
 /// The interview definition (public — the frontend renders onboarding before sign-up).

@@ -400,6 +400,33 @@ fn questions_and_profile() {
     });
 }
 
+/// API-08: the references endpoint returns studies, filterable by feature/rule.
+#[test]
+fn references_endpoint() {
+    RT.block_on(async {
+    let s = state().await;
+    let all = body_json(build_router(s.clone()).oneshot(get("/api/references")).await.unwrap()).await;
+    let arr = all.as_array().unwrap();
+    assert_eq!(arr.len(), 8, "8 studies seeded");
+    // Method papers carry a real DOI; every study has a code + title.
+    assert!(arr.iter().any(|s| s["code"] == "cox-1972-proportional-hazards"
+        && s["doi"].as_str().map(|d| d.starts_with("10.")).unwrap_or(false)));
+    for st in arr {
+        assert!(st["code"].as_str().is_some() && st["title"].as_str().is_some());
+    }
+
+    let act = body_json(build_router(s.clone()).oneshot(get("/api/references?feature=activity")).await.unwrap()).await;
+    let codes: Vec<&str> = act.as_array().unwrap().iter().map(|s| s["code"].as_str().unwrap()).collect();
+    assert!(codes.contains(&"instruments-scoring-formulas") && codes.contains(&"evidence-grades-and-alcohol"));
+
+    let rule = body_json(build_router(s.clone()).oneshot(get("/api/references?rule=quit_smoking")).await.unwrap()).await;
+    assert_eq!(rule.as_array().unwrap().len(), 1);
+
+    let none = body_json(build_router(s.clone()).oneshot(get("/api/references?feature=nope")).await.unwrap()).await;
+    assert_eq!(none.as_array().unwrap().len(), 0, "unknown feature → empty");
+    });
+}
+
 /// DB4: an unknown question code is a 400, not a 500.
 #[test]
 fn unknown_question_code_is_bad_request() {
