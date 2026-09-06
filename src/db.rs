@@ -199,6 +199,74 @@ pub async fn get_profile(pool: &PgPool, account_id: Uuid) -> Result<Option<Profi
     .await
 }
 
+/// A reviewed study/reference (an analysed_papers/ review) backing a factor or rule.
+#[derive(Serialize, sqlx::FromRow, Clone)]
+pub struct Study {
+    pub code: String,
+    pub title: String,
+    pub authors: Option<String>,
+    pub year: Option<i32>,
+    pub venue: Option<String>,
+    pub doi: Option<String>,
+    pub url: Option<String>,
+    pub review_slug: Option<String>,
+    pub evidence_grade: Option<String>,
+}
+
+const STUDY_COLS: &str =
+    "code, title, authors, year, venue, doi, url, review_slug, evidence_grade";
+
+/// All studies, ordered by code.
+pub async fn list_studies(pool: &PgPool) -> Result<Vec<Study>, sqlx::Error> {
+    sqlx::query_as::<_, Study>(&format!("SELECT {STUDY_COLS} FROM study ORDER BY code"))
+        .fetch_all(pool)
+        .await
+}
+
+/// Studies linked to one feature.
+pub async fn studies_for_feature(pool: &PgPool, feature_key: &str) -> Result<Vec<Study>, sqlx::Error> {
+    sqlx::query_as::<_, Study>(&format!(
+        "SELECT {STUDY_COLS} FROM study s
+         JOIN feature_study fs ON fs.study_code = s.code
+         WHERE fs.feature_key = $1 ORDER BY s.code"
+    ))
+    .bind(feature_key)
+    .fetch_all(pool)
+    .await
+}
+
+/// Studies linked to one recommendation rule.
+pub async fn studies_for_rule(pool: &PgPool, rule_code: &str) -> Result<Vec<Study>, sqlx::Error> {
+    sqlx::query_as::<_, Study>(&format!(
+        "SELECT {STUDY_COLS} FROM study s
+         JOIN rule_study rs ON rs.study_code = s.code
+         WHERE rs.rule_code = $1 ORDER BY s.code"
+    ))
+    .bind(rule_code)
+    .fetch_all(pool)
+    .await
+}
+
+/// A study row tagged with the feature it links to (for enriching a full why[] in one query).
+#[derive(sqlx::FromRow)]
+pub struct FeatureStudy {
+    pub feature_key: String,
+    #[sqlx(flatten)]
+    pub study: Study,
+}
+
+/// Every (feature_key, study) link.
+pub async fn all_feature_studies(pool: &PgPool) -> Result<Vec<FeatureStudy>, sqlx::Error> {
+    sqlx::query_as::<_, FeatureStudy>(
+        "SELECT fs.feature_key, s.code, s.title, s.authors, s.year, s.venue, s.doi, s.url,
+                s.review_slug, s.evidence_grade
+         FROM feature_study fs JOIN study s ON s.code = fs.study_code
+         ORDER BY s.code",
+    )
+    .fetch_all(pool)
+    .await
+}
+
 /// An active recommendation rule joined to its feature's role + evidence grade.
 #[derive(sqlx::FromRow)]
 pub struct RuleRow {
