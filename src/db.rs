@@ -154,6 +154,17 @@ pub async fn list_calculations(
     .await
 }
 
+/// The account that owns a calculation, or None if the calculation id does not exist.
+pub async fn calculation_owner(
+    pool: &PgPool,
+    calculation_id: Uuid,
+) -> Result<Option<Uuid>, sqlx::Error> {
+    sqlx::query_scalar("SELECT account_id FROM calculation WHERE id = $1")
+        .bind(calculation_id)
+        .fetch_optional(pool)
+        .await
+}
+
 /// Persist a What-If scenario forked from a base calculation. Returns the new scenario id.
 pub async fn insert_scenario(
     pool: &PgPool,

@@ -97,6 +97,47 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .with_state(state)
 }
 
+/// Extractor for an authenticated caller: a valid `Authorization: Bearer <jwt>` yields the account id.
+pub struct Auth(pub Uuid);
+
+#[axum::async_trait]
+impl axum::extract::FromRequestParts<Arc<AppState>> for Auth {
+    type Rejection = (StatusCode, String);
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        let unauth = |m: &str| (StatusCode::UNAUTHORIZED, m.to_string());
+        let header = parts
+            .headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .ok_or_else(|| unauth("missing bearer token"))?;
+        let token = header
+            .strip_prefix("Bearer ")
+            .ok_or_else(|| unauth("malformed authorization header"))?;
+        let id = auth::verify_token(token.trim(), &state.jwt_secret)
+            .map_err(|_| unauth("invalid or expired token"))?;
+        Ok(Auth(id))
+    }
+}
+
+/// Like `Auth`, but never rejects — `None` when no valid token is present (try-before-signup paths).
+pub struct OptionalAuth(pub Option<Uuid>);
+
+#[axum::async_trait]
+impl axum::extract::FromRequestParts<Arc<AppState>> for OptionalAuth {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        Ok(OptionalAuth(Auth::from_request_parts(parts, state).await.ok().map(|a| a.0)))
+    }
+}
+
 fn db_err(e: sqlx::Error) -> (StatusCode, String) {
     // Keep the detail server-side; return a generic message so internal query/schema detail never
     // reaches the client.
@@ -222,9 +263,11 @@ struct EstimateResponse {
     calculation_id: Uuid,
 }
 
-/// Answers -> Life-Clock estimate. Persists an append-only `calculation` snapshot.
+/// Answers -> Life-Clock estimate. Persists an append-only `calculation` snapshot to the caller's
+/// account (or the shared anonymous account when unauthenticated — try-before-signup).
 async fn estimate_route(
     State(s): State<Arc<AppState>>,
+    OptionalAuth(account): OptionalAuth,
     Json(profile): Json<Profile>,
 ) -> Result<Json<EstimateResponse>, (StatusCode, String)> {
     let est = estimate(&s.bundle, &profile).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
@@ -232,9 +275,10 @@ async fn estimate_route(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialize inputs: {e}")))?;
     // Per-factor attributions are a later surface ("Why?"); the v1 estimate stores an empty list.
     let attributions = json!([]);
+    let owner = account.unwrap_or(s.anon_account_id);
     let id = db::insert_calculation(
         &s.pool,
-        s.anon_account_id,
+        owner,
         s.active_model_id,
         &input_hash(&inputs),
         &inputs,
@@ -270,10 +314,21 @@ struct WhatIfResponse {
 /// Explore a lifestyle change. Overlay only, unless `base_calculation_id` asks to persist a scenario.
 async fn whatif_route(
     State(s): State<Arc<AppState>>,
+    OptionalAuth(account): OptionalAuth,
     Json(req): Json<WhatIfRequest>,
 ) -> Result<Json<WhatIfResponse>, (StatusCode, String)> {
     let wi = whatif(&s.bundle, &req.base, &req.changes).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     let scenario_id = if let Some(base_id) = req.base_calculation_id {
+        // Persisting a scenario requires auth and that the base calculation belongs to the caller.
+        let account = account.ok_or((
+            StatusCode::UNAUTHORIZED,
+            "authentication required to save a scenario".to_string(),
+        ))?;
+        match db::calculation_owner(&s.pool, base_id).await.map_err(db_err)? {
+            Some(owner) if owner == account => {}
+            Some(_) => return Err((StatusCode::FORBIDDEN, "not your calculation".to_string())),
+            None => return Err((StatusCode::NOT_FOUND, "base calculation not found".to_string())),
+        }
         let modifications = serde_json::to_value(&req.changes)
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialize changes: {e}")))?;
         let result = serde_json::to_value(&wi)
@@ -289,14 +344,23 @@ async fn whatif_route(
     Ok(Json(WhatIfResponse { whatif: wi, scenario_id }))
 }
 
-/// Calculation history for the current (anonymous, pre-auth) account, newest first.
+/// Calculation history for the authenticated caller, newest first.
 async fn calculations_route(
     State(s): State<Arc<AppState>>,
+    Auth(account): Auth,
 ) -> Result<Json<Vec<db::CalcRow>>, (StatusCode, String)> {
-    let rows = db::list_calculations(&s.pool, s.anon_account_id, 50)
+    let rows = db::list_calculations(&s.pool, account, 50)
         .await
         .map_err(db_err)?;
     Ok(Json(rows))
+}
+
+/// Resolve the caller's profile id (each account has exactly one profile).
+async fn caller_profile(s: &AppState, account: Uuid) -> Result<Uuid, (StatusCode, String)> {
+    db::profile_id_for_account(&s.pool, account)
+        .await
+        .map_err(db_err)?
+        .ok_or((StatusCode::INTERNAL_SERVER_ERROR, "no profile for account".to_string()))
 }
 
 #[derive(Deserialize)]
@@ -310,13 +374,15 @@ struct AnswersRequest {
     answers: Vec<AnswerInput>,
 }
 
-/// Upsert the current answers for the (anonymous) profile.
+/// Upsert the current answers for the authenticated caller's profile.
 async fn post_answers_route(
     State(s): State<Arc<AppState>>,
+    Auth(account): Auth,
     Json(req): Json<AnswersRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let profile_id = caller_profile(&s, account).await?;
     for a in &req.answers {
-        db::upsert_answer(&s.pool, s.anon_profile_id, &a.question_code, &a.value)
+        db::upsert_answer(&s.pool, profile_id, &a.question_code, &a.value)
             .await
             .map_err(|e| match e {
                 sqlx::Error::RowNotFound => (
@@ -329,12 +395,12 @@ async fn post_answers_route(
     Ok(Json(json!({ "saved": req.answers.len() })))
 }
 
-/// Read back the current answers for the (anonymous) profile.
+/// Read back the current answers for the authenticated caller's profile.
 async fn get_answers_route(
     State(s): State<Arc<AppState>>,
+    Auth(account): Auth,
 ) -> Result<Json<Vec<db::AnswerRow>>, (StatusCode, String)> {
-    let rows = db::list_answers(&s.pool, s.anon_profile_id)
-        .await
-        .map_err(db_err)?;
+    let profile_id = caller_profile(&s, account).await?;
+    let rows = db::list_answers(&s.pool, profile_id).await.map_err(db_err)?;
     Ok(Json(rows))
 }
