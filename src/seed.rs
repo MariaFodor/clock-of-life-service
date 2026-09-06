@@ -20,6 +20,7 @@ const FEATURES_JSON: &str = include_str!("../seeds/features.json");
 const QUESTIONS_JSON: &str = include_str!("../seeds/questions.json");
 const RULES_JSON: &str = include_str!("../seeds/recommendation_rules.json");
 const STUDIES_JSON: &str = include_str!("../seeds/studies.json");
+const LOCATIONS_JSON: &str = include_str!("../seeds/locations.json");
 
 #[derive(Deserialize)]
 struct FeatureSeed {
@@ -64,6 +65,21 @@ struct StudySeedFile {
 }
 
 #[derive(Deserialize)]
+struct LocationSeed {
+    name: String,
+    country: String,
+    pm25: Option<f64>,
+    ndvi: Option<f64>,
+    area_type: Option<String>,
+    as_of: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct LocationSeedFile {
+    locations: Vec<LocationSeed>,
+}
+
+#[derive(Deserialize)]
 struct RuleSeed {
     code: String,
     feature_key: String,
@@ -102,6 +118,7 @@ pub async fn reconcile(
     seed_questions(pool).await?;
     seed_recommendation_rules(pool).await?;
     seed_studies(pool).await?;
+    seed_locations(pool).await?;
     let active_model_id = pin_model_version(pool, manifest, artifact_uri).await?;
     ensure_anonymous(pool).await?;
     Ok(SeedResult {
@@ -223,6 +240,35 @@ async fn seed_studies(pool: &PgPool) -> Result<(), sqlx::Error> {
             "INSERT INTO rule_study (rule_code, study_code) VALUES ($1, $2) ON CONFLICT DO NOTHING",
         )
         .bind(&l.rule_code).bind(&l.study_code)
+        .execute(pool)
+        .await?;
+    }
+    Ok(())
+}
+
+/// Seed the location table (PM2.5 / greenspace per place) for the ENV feature + relocation compare.
+/// Values are illustrative placeholders (RES-04): real RO layers must replace them before launch.
+async fn seed_locations(pool: &PgPool) -> Result<(), sqlx::Error> {
+    let data: LocationSeedFile =
+        serde_json::from_str(LOCATIONS_JSON).expect("locations.json seed is valid");
+    for l in &data.locations {
+        let as_of = l
+            .as_of
+            .as_deref()
+            .and_then(|s| chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").ok());
+        sqlx::query(
+            "INSERT INTO location (name, country, pm25, ndvi, area_type, as_of)
+             VALUES ($1, $2, $3, $4, $5, $6)
+             ON CONFLICT (name, country) DO UPDATE SET
+                 pm25 = EXCLUDED.pm25, ndvi = EXCLUDED.ndvi,
+                 area_type = EXCLUDED.area_type, as_of = EXCLUDED.as_of",
+        )
+        .bind(&l.name)
+        .bind(&l.country)
+        .bind(l.pm25)
+        .bind(l.ndvi)
+        .bind(&l.area_type)
+        .bind(as_of)
         .execute(pool)
         .await?;
     }

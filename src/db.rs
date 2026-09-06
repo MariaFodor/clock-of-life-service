@@ -199,6 +199,42 @@ pub async fn get_profile(pool: &PgPool, account_id: Uuid) -> Result<Option<Profi
     .await
 }
 
+/// A location with its environmental exposures (for the ENV feature + relocation compare).
+#[derive(Serialize, sqlx::FromRow, Clone)]
+pub struct LocationRow {
+    pub name: String,
+    pub country: String,
+    pub pm25: Option<f64>,
+    pub ndvi: Option<f64>,
+    pub area_type: Option<String>,
+}
+
+/// All locations, ordered by name.
+pub async fn list_locations(pool: &PgPool) -> Result<Vec<LocationRow>, sqlx::Error> {
+    sqlx::query_as::<_, LocationRow>(
+        "SELECT name, country, pm25::float8 AS pm25, ndvi::float8 AS ndvi, area_type
+         FROM location ORDER BY name",
+    )
+    .fetch_all(pool)
+    .await
+}
+
+/// A single location by name (+ country), for resolving a relocation target.
+pub async fn location_by_name(
+    pool: &PgPool,
+    name: &str,
+    country: &str,
+) -> Result<Option<LocationRow>, sqlx::Error> {
+    sqlx::query_as::<_, LocationRow>(
+        "SELECT name, country, pm25::float8 AS pm25, ndvi::float8 AS ndvi, area_type
+         FROM location WHERE name = $1 AND country = $2",
+    )
+    .bind(name)
+    .bind(country)
+    .fetch_optional(pool)
+    .await
+}
+
 /// A reviewed study/reference (an analysed_papers/ review) backing a factor or rule.
 #[derive(Serialize, sqlx::FromRow, Clone)]
 pub struct Study {

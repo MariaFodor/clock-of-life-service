@@ -94,6 +94,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/meta", get(meta))
         .route("/api/questions", get(questions_route))
         .route("/api/references", get(references_route))
+        .route("/api/locations", get(locations_route))
         .route("/api/auth/register", post(register_route))
         .route("/api/auth/login", post(login_route))
         .route("/api/estimate", post(estimate_route))
@@ -181,6 +182,14 @@ async fn meta(State(s): State<Arc<AppState>>) -> Json<serde_json::Value> {
             "relative risk centred on the selected country's average person",
         ],
     }))
+}
+
+/// All known locations with their PM2.5 / greenspace (public — powers the location picker + compare).
+async fn locations_route(
+    State(s): State<Arc<AppState>>,
+) -> Result<Json<Vec<db::LocationRow>>, (StatusCode, String)> {
+    let rows = db::list_locations(&s.pool).await.map_err(db_err)?;
+    Ok(Json(rows))
 }
 
 #[derive(Deserialize)]
