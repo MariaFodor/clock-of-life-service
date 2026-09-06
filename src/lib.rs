@@ -105,7 +105,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/profile", get(profile_route))
         .route("/api/profile/location", post(set_location_route))
         .route("/api/account/export", get(account_export_route))
-        .route("/api/account", delete(account_delete_route))
+        .route("/api/account", delete(account_delete_route).patch(account_update_route))
         .route("/api/answers", get(get_answers_route).post(post_answers_route))
         .route("/api/admin/audit", get(audit_route))
         .route("/api/admin/questions", post(admin_create_question))
@@ -624,6 +624,27 @@ async fn account_export_route(
         "answers": answers,
         "calculations": calculations,
     })))
+}
+
+#[derive(Deserialize)]
+struct AccountUpdate {
+    locale: String,
+}
+
+/// Correct account-level data (auth) — right to rectification. Currently the locale.
+async fn account_update_route(
+    State(s): State<Arc<AppState>>,
+    Auth(account): Auth,
+    Json(req): Json<AccountUpdate>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if req.locale.trim().is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "locale must not be empty".to_string()));
+    }
+    let updated = db::update_account_locale(&s.pool, account, &req.locale).await.map_err(db_err)?;
+    if updated == 0 {
+        return Err((StatusCode::NOT_FOUND, "account not found".to_string()));
+    }
+    Ok(Json(json!({ "locale": req.locale })))
 }
 
 /// GDPR erasure (auth): permanently delete the caller's account and all data cascading from it.

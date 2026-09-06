@@ -554,6 +554,16 @@ pub async fn account_export_json(pool: &PgPool, id: Uuid) -> Result<Option<Value
     .await
 }
 
+/// Correct an account's locale (right to rectification). Returns rows affected (0 or 1).
+pub async fn update_account_locale(pool: &PgPool, id: Uuid, locale: &str) -> Result<u64, sqlx::Error> {
+    let r = sqlx::query("UPDATE account SET locale = $1 WHERE id = $2")
+        .bind(locale)
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(r.rows_affected())
+}
+
 /// Permanently delete an account and everything cascading from it (profile, answers, calculations,
 /// scenarios). Returns the number of accounts deleted (0 or 1).
 pub async fn delete_account(pool: &PgPool, id: Uuid) -> Result<u64, sqlx::Error> {

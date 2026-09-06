@@ -86,6 +86,16 @@ fn get_auth(uri: &str, token: &str) -> Request<Body> {
         .unwrap()
 }
 
+fn patch_auth(uri: &str, body: Value, token: &str) -> Request<Body> {
+    Request::builder()
+        .method("PATCH")
+        .uri(uri)
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {token}"))
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
 fn delete_auth(uri: &str, token: &str) -> Request<Body> {
     Request::builder()
         .method("DELETE")
@@ -660,6 +670,32 @@ fn account_erasure_cascades() {
     // B is untouched.
     let b_calcs = body_json(build_router(s.clone()).oneshot(get_auth("/api/calculations", &b)).await.unwrap()).await;
     assert!(b_calcs.as_array().unwrap().len() >= 1, "other account unaffected");
+    });
+}
+
+/// API-23: right to rectification — answers, and account locale, can be corrected.
+#[test]
+fn rectification() {
+    RT.block_on(async {
+    let s = state().await;
+    let token = register_token(&s).await;
+
+    // Correct an answer (upsert) — already covered elsewhere, asserted here as part of the surface.
+    build_router(s.clone()).oneshot(post_auth("/api/answers", json!({"answers": [{"question_code": "Q5_smoking", "value": "Yes, currently"}]}), &token)).await.unwrap();
+    build_router(s.clone()).oneshot(post_auth("/api/answers", json!({"answers": [{"question_code": "Q5_smoking", "value": "No, never"}]}), &token)).await.unwrap();
+    let p = body_json(build_router(s.clone()).oneshot(get_auth("/api/profile", &token)).await.unwrap()).await;
+    let q5 = p["answers"].as_array().unwrap().iter().find(|a| a["question_code"] == "Q5_smoking").unwrap();
+    assert_eq!(q5["value"], "No, never", "answer corrected");
+
+    // Correct the account locale.
+    assert_eq!(build_router(s.clone()).oneshot(patch_auth("/api/account", json!({"locale": ""}), &token)).await.unwrap().status(), StatusCode::BAD_REQUEST);
+    let resp = build_router(s.clone()).oneshot(patch_auth("/api/account", json!({"locale": "en"}), &token)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let exp = body_json(build_router(s.clone()).oneshot(get_auth("/api/account/export", &token)).await.unwrap()).await;
+    assert_eq!(exp["account"]["locale"], "en", "locale corrected");
+
+    // No auth → 401.
+    assert_eq!(build_router(s.clone()).oneshot(patch_auth("/api/account", json!({"locale": "ro"}), "")).await.unwrap().status(), StatusCode::UNAUTHORIZED);
     });
 }
 
