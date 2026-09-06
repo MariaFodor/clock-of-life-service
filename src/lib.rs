@@ -26,7 +26,10 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use bundle::Bundle;
-use scoring::{attributions, estimate, whatif, Attribution, Estimate, Profile, WhatIf, WhatIfChanges};
+use scoring::{
+    attributions, estimate, eval_condition, whatif, Attribution, Estimate, Profile, WhatIf,
+    WhatIfChanges,
+};
 use sqlx::postgres::PgPool;
 
 /// Shared application state: the loaded model, the DB pool, and the ids resolved at reconciliation.
@@ -91,6 +94,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/auth/register", post(register_route))
         .route("/api/auth/login", post(login_route))
         .route("/api/estimate", post(estimate_route))
+        .route("/api/recommendations", post(recommendations_route))
         .route("/api/whatif", post(whatif_route))
         .route("/api/calculations", get(calculations_route))
         .route("/api/answers", get(get_answers_route).post(post_answers_route))
@@ -302,6 +306,67 @@ async fn estimate_route(
     .await
     .map_err(db_err)?;
     Ok(Json(EstimateResponse { estimate: est, why, model, calculation_id: id }))
+}
+
+/// A prioritized, evidence-cited recommendation (levers/manage only, never context/baseline).
+#[derive(Serialize)]
+struct Recommendation {
+    feature: String,
+    message: String,
+    role: String,
+    priority: i32,
+    evidence_grade: Option<String>,
+    evidence_citation: String,
+    /// Years currently at stake on this factor (|attribution delta|).
+    impact_years: f64,
+    /// Ranking score: impact_years × confidence(grade) × (priority/100).
+    score: f64,
+}
+
+/// Evaluate the seeded rules against a profile and return prioritized recommendations.
+/// No persistence, no auth required (a pure function of the submitted profile) — try-before-signup.
+async fn recommendations_route(
+    State(s): State<Arc<AppState>>,
+    Json(profile): Json<Profile>,
+) -> Result<Json<Vec<Recommendation>>, (StatusCode, String)> {
+    // attributions() validates the profile and gives the per-factor years-at-stake used for ranking.
+    let why = attributions(&s.bundle, &profile).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let impact: std::collections::HashMap<&str, f64> =
+        why.iter().map(|a| (a.key.as_str(), a.delta_years.abs())).collect();
+
+    let rules = db::active_recommendation_rules(&s.pool).await.map_err(db_err)?;
+    let mut recs: Vec<Recommendation> = rules
+        .into_iter()
+        .filter(|r| eval_condition(&profile, &r.condition))
+        .map(|r| {
+            let impact_years = impact.get(r.feature_key.as_str()).copied().unwrap_or(0.0);
+            let confidence = match r.evidence_grade.as_deref() {
+                Some("strong") => 1.0,
+                Some("moderate") => 0.6,
+                Some("weak") => 0.3,
+                _ => 0.3,
+            };
+            let score = impact_years * confidence * (r.priority as f64 / 100.0);
+            Recommendation {
+                feature: r.feature_key,
+                message: r.message,
+                role: r.role,
+                priority: r.priority,
+                evidence_grade: r.evidence_grade,
+                evidence_citation: r.evidence_citation,
+                impact_years: (impact_years * 10.0).round() / 10.0,
+                score: (score * 100.0).round() / 100.0,
+            }
+        })
+        .collect();
+    // Rank by score (impact × confidence × priority), then priority as a stable tiebreak.
+    recs.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(b.priority.cmp(&a.priority))
+    });
+    Ok(Json(recs))
 }
 
 #[derive(Deserialize)]

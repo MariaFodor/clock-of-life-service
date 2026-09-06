@@ -154,6 +154,34 @@ pub async fn list_calculations(
     .await
 }
 
+/// An active recommendation rule joined to its feature's role + evidence grade.
+#[derive(sqlx::FromRow)]
+pub struct RuleRow {
+    pub code: String,
+    pub feature_key: String,
+    pub condition: Value,
+    pub message: String,
+    pub priority: i32,
+    pub evidence_citation: String,
+    pub role: String,
+    pub evidence_grade: Option<String>,
+}
+
+/// Active rules whose feature is a modifiable lever or a manageable condition (never context/baseline),
+/// highest priority first. Context/baseline factors are explained, never turned into advice (ADR-001).
+pub async fn active_recommendation_rules(pool: &PgPool) -> Result<Vec<RuleRow>, sqlx::Error> {
+    sqlx::query_as::<_, RuleRow>(
+        "SELECT r.code, r.feature_key, r.condition, r.message, r.priority, r.evidence_citation,
+                f.role, f.evidence_grade
+         FROM recommendation_rule r
+         JOIN feature f ON f.key = r.feature_key
+         WHERE r.active AND f.active AND f.role IN ('lever', 'manage')
+         ORDER BY r.priority DESC, r.code",
+    )
+    .fetch_all(pool)
+    .await
+}
+
 /// The account that owns a calculation, or None if the calculation id does not exist.
 pub async fn calculation_owner(
     pool: &PgPool,

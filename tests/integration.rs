@@ -269,6 +269,39 @@ fn whatif_scenario_requires_ownership() {
     });
 }
 
+/// API-03: recommendations are ranked by score, scoped to levers/manage, and empty for a healthy user.
+#[test]
+fn recommendations_rank_and_scope() {
+    RT.block_on(async {
+    let s = state().await;
+    let high = json!({"country": "RO", "age": 55, "sex": "M", "smoke": 2, "pa_min": 0, "sleep": 9,
+                      "waist": 115, "diabetes": true, "high_bp": true});
+    let resp = build_router(s.clone()).oneshot(post("/api/recommendations", high)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let recs = body_json(resp).await;
+    let arr = recs.as_array().expect("array");
+    assert!(!arr.is_empty(), "high-risk profile gets recommendations");
+    // Top recommendation is quitting smoking (highest impact × priority).
+    assert_eq!(arr[0]["feature"], "smk_current");
+    // Sorted by descending score; every recommendation is a lever or manage factor (never context).
+    for pair in arr.windows(2) {
+        assert!(pair[0]["score"].as_f64().unwrap() >= pair[1]["score"].as_f64().unwrap(), "sorted by score");
+    }
+    for r in arr {
+        let role = r["role"].as_str().unwrap();
+        assert!(role == "lever" || role == "manage", "only levers/manage recommended, got {role}");
+        assert!(!r["evidence_citation"].as_str().unwrap().is_empty(), "recommendation is evidence-cited");
+    }
+
+    // A healthy profile triggers no rules.
+    let healthy = json!({"country": "RO", "age": 40, "sex": "F", "smoke": 0, "pa_min": 2000,
+                         "sleep": 7, "waist": 78});
+    let resp = build_router(s.clone()).oneshot(post("/api/recommendations", healthy)).await.unwrap();
+    let recs = body_json(resp).await;
+    assert_eq!(recs.as_array().unwrap().len(), 0, "healthy profile gets no recommendations");
+    });
+}
+
 /// DB3: What-If without a base is a pure overlay — nothing persisted, no auth required.
 #[test]
 fn whatif_overlay_only_when_no_base() {

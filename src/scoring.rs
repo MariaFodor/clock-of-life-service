@@ -160,6 +160,8 @@ fn round1(x: f64) -> f64 { (x * 10.0).round() / 10.0 }
 /// One factor's contribution to the estimate, for the "Why?" surface.
 #[derive(Serialize)]
 pub struct Attribution {
+    /// The feature/design key (e.g. "smk_current"), so callers can map back to features/rules.
+    pub key: String,
     pub factor: String,
     /// Years this factor adds (+) or costs (-) vs its reference level (cohort mean for z-scored
     /// continuous factors, or the factor being absent for binary factors).
@@ -221,6 +223,7 @@ pub fn attributions(bundle: &Bundle, p: &Profile) -> Result<Vec<Attribution>, St
         }
         let ev = bundle.evidence.get(*key);
         out.push(Attribution {
+            key: (*key).to_string(),
             factor: label.to_string(),
             delta_years: round1(delta),
             role: ev.map(|e| e.role.clone()).unwrap_or_default(),
@@ -305,6 +308,52 @@ pub fn whatif(bundle: &Bundle, base: &Profile, changes: &WhatIfChanges) -> Resul
     })
 }
 
+/// Read a numeric view of a `Profile` field by name (booleans as 0.0/1.0). None for unknown fields.
+fn profile_field(p: &Profile, field: &str) -> Option<f64> {
+    Some(match field {
+        "age" => p.age,
+        "smoke" => p.smoke as f64,
+        "pa_min" => p.pa_min,
+        "sleep" => p.sleep,
+        "waist" => p.waist,
+        "income" => p.income,
+        "diabetes" => b(p.diabetes),
+        "high_bp" => b(p.high_bp),
+        "respiratory" => b(p.respiratory),
+        "cvd_hx" => b(p.cvd_hx),
+        "cancer_hx" => b(p.cancer_hx),
+        "higher_educ" => b(p.higher_educ),
+        _ => return None,
+    })
+}
+
+/// Evaluate a `recommendation_rule.condition` (`{field, op, value}`) against a profile.
+/// Supported ops: eq, ne, gt, lt, gte, lte. Booleans compare as 1.0/0.0. Malformed → false.
+pub fn eval_condition(p: &Profile, condition: &serde_json::Value) -> bool {
+    let field = condition.get("field").and_then(|v| v.as_str());
+    let op = condition.get("op").and_then(|v| v.as_str());
+    let value = condition.get("value").and_then(|v| {
+        v.as_f64().or_else(|| v.as_bool().map(|b| if b { 1.0 } else { 0.0 }))
+    });
+    let (field, op, rhs) = match (field, op, value) {
+        (Some(f), Some(o), Some(v)) => (f, o, v),
+        _ => return false,
+    };
+    let lhs = match profile_field(p, field) {
+        Some(x) => x,
+        None => return false,
+    };
+    match op {
+        "eq" => (lhs - rhs).abs() < 1e-9,
+        "ne" => (lhs - rhs).abs() >= 1e-9,
+        "gt" => lhs > rhs,
+        "lt" => lhs < rhs,
+        "gte" => lhs >= rhs,
+        "lte" => lhs <= rhs,
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -360,6 +409,26 @@ mod tests {
         assert!(bad(&|p| p.waist = 5.0), "implausible waist rejected");
         assert!(bad(&|p| p.sex = "X".into()), "bad sex rejected");
         assert!(bad(&|p| p.sleep = 30.0), "impossible sleep rejected");
+    }
+
+    #[test]
+    fn condition_evaluation() {
+        let p = Profile {
+            country: "RO".into(), age: 55.0, sex: "M".into(), smoke: 2, pa_min: 100.0, sleep: 9.0,
+            waist: 110.0, diabetes: true, high_bp: false, respiratory: false, cvd_hx: false,
+            cancer_hx: false, higher_educ: false, income: 2.5,
+        };
+        use serde_json::json;
+        assert!(eval_condition(&p, &json!({"field": "smoke", "op": "eq", "value": 2})));
+        assert!(!eval_condition(&p, &json!({"field": "smoke", "op": "eq", "value": 0})));
+        assert!(eval_condition(&p, &json!({"field": "pa_min", "op": "lt", "value": 500})));
+        assert!(eval_condition(&p, &json!({"field": "waist", "op": "gt", "value": 100})));
+        assert!(eval_condition(&p, &json!({"field": "sleep", "op": "gte", "value": 9})));
+        assert!(eval_condition(&p, &json!({"field": "diabetes", "op": "eq", "value": true})));
+        assert!(!eval_condition(&p, &json!({"field": "high_bp", "op": "eq", "value": true})));
+        // Malformed / unknown → false, never panics.
+        assert!(!eval_condition(&p, &json!({"field": "nonsense", "op": "eq", "value": 1})));
+        assert!(!eval_condition(&p, &json!({"op": "eq", "value": 1})));
     }
 
     #[test]
