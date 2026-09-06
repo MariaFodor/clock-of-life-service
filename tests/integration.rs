@@ -101,6 +101,23 @@ async fn register_token(s: &Arc<AppState>) -> String {
     body_json(resp).await["token"].as_str().unwrap().to_string()
 }
 
+/// Register a fresh account, promote it to admin (via SQL), and return its bearer token.
+async fn register_admin(s: &Arc<AppState>) -> String {
+    let resp = build_router(s.clone())
+        .oneshot(post("/api/auth/register", json!({"email": unique_email(), "password": "password123"})))
+        .await
+        .unwrap();
+    let body = body_json(resp).await;
+    let token = body["token"].as_str().unwrap().to_string();
+    let account_id = body["account_id"].as_str().unwrap().to_string();
+    sqlx::query("UPDATE account SET is_admin = true WHERE id = $1::uuid")
+        .bind(&account_id)
+        .execute(&s.pool)
+        .await
+        .unwrap();
+    token
+}
+
 fn valid_profile() -> Value {
     json!({"country": "RO", "age": 40, "sex": "M", "smoke": 0, "pa_min": 300, "sleep": 7, "waist": 90})
 }
@@ -479,6 +496,23 @@ fn env_is_lever_only_in_relocate() {
     let rel = body_json(build_router(s.clone())
         .oneshot(post("/api/relocate", json!({"base": dirty, "to": "Rural (national)"}))).await.unwrap()).await;
     assert!(rel["delta_years"].as_f64().unwrap() > 0.0, "moving to cleaner air adds years (env as lever)");
+    });
+}
+
+/// API-16: the admin surface is gated — 401 unauthenticated, 403 for a regular user, 200 for an admin.
+#[test]
+fn admin_gate() {
+    RT.block_on(async {
+    let s = state().await;
+    assert_eq!(build_router(s.clone()).oneshot(get("/api/admin/audit")).await.unwrap().status(), StatusCode::UNAUTHORIZED);
+
+    let user = register_token(&s).await;
+    assert_eq!(build_router(s.clone()).oneshot(get_auth("/api/admin/audit", &user)).await.unwrap().status(), StatusCode::FORBIDDEN);
+
+    let admin = register_admin(&s).await;
+    let resp = build_router(s.clone()).oneshot(get_auth("/api/admin/audit", &admin)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(body_json(resp).await.is_array(), "audit log is a list");
     });
 }
 

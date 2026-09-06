@@ -105,6 +105,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/profile", get(profile_route))
         .route("/api/profile/location", post(set_location_route))
         .route("/api/answers", get(get_answers_route).post(post_answers_route))
+        .route("/api/admin/audit", get(audit_route))
         .with_state(state)
 }
 
@@ -146,6 +147,26 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for OptionalAuth {
         state: &Arc<AppState>,
     ) -> Result<Self, Self::Rejection> {
         Ok(OptionalAuth(Auth::from_request_parts(parts, state).await.ok().map(|a| a.0)))
+    }
+}
+
+/// Extractor for an authenticated admin: valid bearer token AND the account's `is_admin` flag.
+pub struct Admin(pub Uuid);
+
+#[axum::async_trait]
+impl axum::extract::FromRequestParts<Arc<AppState>> for Admin {
+    type Rejection = (StatusCode, String);
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        let Auth(account) = Auth::from_request_parts(parts, state).await?;
+        if db::is_admin(&state.pool, account).await.map_err(db_err)? {
+            Ok(Admin(account))
+        } else {
+            Err((StatusCode::FORBIDDEN, "admin only".to_string()))
+        }
     }
 }
 
@@ -620,6 +641,15 @@ async fn set_location_route(
         .await
         .map_err(db_err)?;
     Ok(Json(json!({ "home_location_id": location_id })))
+}
+
+/// The audit log (admin only), newest first.
+async fn audit_route(
+    State(s): State<Arc<AppState>>,
+    Admin(_admin): Admin,
+) -> Result<Json<Vec<db::AuditRow>>, (StatusCode, String)> {
+    let rows = db::list_audit_events(&s.pool, 200).await.map_err(db_err)?;
+    Ok(Json(rows))
 }
 
 /// Resolve the caller's profile id (each account has exactly one profile).

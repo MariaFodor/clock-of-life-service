@@ -199,6 +199,77 @@ pub async fn get_profile(pool: &PgPool, account_id: Uuid) -> Result<Option<Profi
     .await
 }
 
+/// Whether an account has the admin flag.
+pub async fn is_admin(pool: &PgPool, account_id: Uuid) -> Result<bool, sqlx::Error> {
+    Ok(sqlx::query_scalar::<_, bool>("SELECT is_admin FROM account WHERE id = $1")
+        .bind(account_id)
+        .fetch_optional(pool)
+        .await?
+        .unwrap_or(false))
+}
+
+/// Promote/demote an account's admin flag (used by ops bootstrap + tests).
+pub async fn set_admin(pool: &PgPool, account_id: Uuid, admin: bool) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE account SET is_admin = $1 WHERE id = $2")
+        .bind(admin)
+        .bind(account_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Append an audit event (every admin mutation writes one — evidence traceability).
+#[allow(clippy::too_many_arguments)]
+pub async fn insert_audit_event(
+    pool: &PgPool,
+    admin_id: Uuid,
+    entity: &str,
+    entity_id: &str,
+    action: &str,
+    before: Option<&Value>,
+    after: Option<&Value>,
+    citation: Option<&str>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO audit_event (admin_id, entity, entity_id, action, before, after, citation)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)",
+    )
+    .bind(admin_id)
+    .bind(entity)
+    .bind(entity_id)
+    .bind(action)
+    .bind(before)
+    .bind(after)
+    .bind(citation)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// One audit-log row.
+#[derive(Serialize, sqlx::FromRow)]
+pub struct AuditRow {
+    pub admin_id: Option<Uuid>,
+    pub entity: String,
+    pub entity_id: String,
+    pub action: String,
+    pub before: Option<Value>,
+    pub after: Option<Value>,
+    pub citation: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// The audit log, newest first.
+pub async fn list_audit_events(pool: &PgPool, limit: i64) -> Result<Vec<AuditRow>, sqlx::Error> {
+    sqlx::query_as::<_, AuditRow>(
+        "SELECT admin_id, entity, entity_id, action, before, after, citation, created_at
+         FROM audit_event ORDER BY created_at DESC, entity_id LIMIT $1",
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+}
+
 /// A location with its environmental exposures (for the ENV feature + relocation compare).
 #[derive(Serialize, sqlx::FromRow, Clone)]
 pub struct LocationRow {
