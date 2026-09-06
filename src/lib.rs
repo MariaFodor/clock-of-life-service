@@ -99,6 +99,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/auth/login", post(login_route))
         .route("/api/estimate", post(estimate_route))
         .route("/api/recommendations", post(recommendations_route))
+        .route("/api/relocate", post(relocate_route))
         .route("/api/whatif", post(whatif_route))
         .route("/api/calculations", get(calculations_route))
         .route("/api/profile", get(profile_route))
@@ -442,6 +443,74 @@ async fn recommendations_route(
             .then(b.priority.cmp(&a.priority))
     });
     Ok(Json(recs))
+}
+
+#[derive(Deserialize)]
+struct RelocateRequest {
+    base: Profile,
+    /// Candidate location to move to (by name).
+    to: String,
+    /// Optional current location (by name); overrides base.pm25/ndvi. Else base's own env is the baseline.
+    #[serde(default)]
+    from: Option<String>,
+    #[serde(default = "default_country")]
+    country: String,
+}
+
+/// "Where Should I Live?" — compare remaining years at a candidate location vs the current one, and
+/// explain how much of the gap is air (PM2.5) vs greenspace. Pure, no auth, no persistence. ENV is the
+/// lever here (the location is the thing being changed).
+async fn relocate_route(
+    State(s): State<Arc<AppState>>,
+    Json(req): Json<RelocateRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let round1 = |x: f64| (x * 10.0).round() / 10.0;
+    let to = db::location_by_name(&s.pool, &req.to, &req.country)
+        .await
+        .map_err(db_err)?
+        .ok_or((StatusCode::NOT_FOUND, format!("unknown location: {} ({})", req.to, req.country)))?;
+
+    // Baseline profile: optionally take env from a named `from` location.
+    let mut base = req.base.clone();
+    let from_json = if let Some(fname) = &req.from {
+        let f = db::location_by_name(&s.pool, fname, &req.country)
+            .await
+            .map_err(db_err)?
+            .ok_or((StatusCode::NOT_FOUND, format!("unknown location: {} ({})", fname, req.country)))?;
+        base.pm25 = f.pm25;
+        base.ndvi = f.ndvi;
+        json!({"name": f.name, "pm25": f.pm25, "ndvi": f.ndvi})
+    } else {
+        serde_json::Value::Null
+    };
+
+    let bad = |e: String| (StatusCode::BAD_REQUEST, e);
+    let current = estimate(&s.bundle, &base).map_err(bad)?.estimate_years;
+    // Full move (both air + green change).
+    let mut moved = base.clone();
+    moved.pm25 = to.pm25;
+    moved.ndvi = to.ndvi;
+    let relocated = estimate(&s.bundle, &moved).map_err(bad)?.estimate_years;
+    // Isolate each driver: change only air, then only greenspace.
+    let mut air = base.clone();
+    air.pm25 = to.pm25;
+    let air_years = estimate(&s.bundle, &air).map_err(bad)?.estimate_years;
+    let mut green = base.clone();
+    green.ndvi = to.ndvi;
+    let green_years = estimate(&s.bundle, &green).map_err(bad)?.estimate_years;
+
+    Ok(Json(json!({
+        "from": from_json,
+        "to": {"name": to.name, "pm25": to.pm25, "ndvi": to.ndvi},
+        "current_years": current,
+        "relocated_years": relocated,
+        "delta_years": round1(relocated - current),
+        "breakdown": {
+            "air_delta_years": round1(air_years - current),
+            "greenspace_delta_years": round1(green_years - current),
+        },
+        "note": "statistical scenario; location exposure is ecological (assigned by area, not measured) — medium confidence, not a promise",
+    })))
 }
 
 #[derive(Deserialize)]

@@ -457,6 +457,33 @@ fn references_wired_into_why_and_recommendations() {
     });
 }
 
+/// API-14: relocate compares locations and explains air vs greenspace; symmetric; 404 on unknown.
+#[test]
+fn relocate_compares_locations() {
+    RT.block_on(async {
+    let s = state().await;
+    let base = json!({"country": "RO", "age": 45, "sex": "M", "smoke": 0, "pa_min": 600, "sleep": 7, "waist": 90});
+
+    let resp = build_router(s.clone())
+        .oneshot(post("/api/relocate", json!({"base": base, "from": "Bucharest", "to": "Brașov"}))).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let r = body_json(resp).await;
+    assert!(r["delta_years"].as_f64().unwrap() > 0.0, "cleaner+greener location adds years");
+    assert!(r["breakdown"]["air_delta_years"].as_f64().is_some());
+    assert!(r["breakdown"]["greenspace_delta_years"].as_f64().is_some());
+
+    // Reverse move loses years (symmetric).
+    let rev = body_json(build_router(s.clone())
+        .oneshot(post("/api/relocate", json!({"base": base, "from": "Brașov", "to": "Bucharest"}))).await.unwrap()).await;
+    assert!(rev["delta_years"].as_f64().unwrap() < 0.0, "dirtier location costs years");
+
+    // Unknown target → 404.
+    assert_eq!(
+        build_router(s.clone()).oneshot(post("/api/relocate", json!({"base": base, "to": "Atlantis"}))).await.unwrap().status(),
+        StatusCode::NOT_FOUND);
+    });
+}
+
 /// API-11 + API-13: locations are listed (public); a caller can set their home location.
 #[test]
 fn locations_and_home_location() {
