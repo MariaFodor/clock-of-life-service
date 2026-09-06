@@ -16,9 +16,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use axum::{
-    extract::{Query, State},
+    extract::{Path as AxumPath, Query, State},
     http::StatusCode,
-    routing::{get, post},
+    routing::{get, post, put},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
@@ -106,6 +106,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/profile/location", post(set_location_route))
         .route("/api/answers", get(get_answers_route).post(post_answers_route))
         .route("/api/admin/audit", get(audit_route))
+        .route("/api/admin/questions", post(admin_create_question))
+        .route("/api/admin/questions/:code", put(admin_update_question))
         .with_state(state)
 }
 
@@ -641,6 +643,99 @@ async fn set_location_route(
         .await
         .map_err(db_err)?;
     Ok(Json(json!({ "home_location_id": location_id })))
+}
+
+/// Admin mutations must cite their evidence (evidence-traceability); reject a blank citation.
+fn require_citation(citation: &str) -> Result<(), (StatusCode, String)> {
+    if citation.trim().is_empty() {
+        Err((StatusCode::BAD_REQUEST, "citation is required for admin changes".to_string()))
+    } else {
+        Ok(())
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Deserialize)]
+struct QuestionCreate {
+    code: String,
+    section: String,
+    text: String,
+    input_type: String,
+    #[serde(default)]
+    options: Option<serde_json::Value>,
+    #[serde(default)]
+    feature_key: Option<String>,
+    #[serde(default = "default_true")]
+    required: bool,
+    #[serde(default)]
+    evidence_citation: Option<String>,
+    /// Audit citation for this change (required).
+    citation: String,
+}
+
+/// Create a question (admin). Writes an audit event; duplicate code → 409.
+async fn admin_create_question(
+    State(s): State<Arc<AppState>>,
+    Admin(admin): Admin,
+    Json(req): Json<QuestionCreate>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    require_citation(&req.citation)?;
+    let after = db::admin_create_question(
+        &s.pool, admin, &req.code, &req.section, &req.text, &req.input_type,
+        req.options.as_ref(), req.feature_key.as_deref(), req.required, req.evidence_citation.as_deref(),
+        &req.citation,
+    )
+    .await
+    .map_err(|e| {
+        if db::is_unique_violation(&e) {
+            (StatusCode::CONFLICT, "question code already exists".to_string())
+        } else if db::is_foreign_key_violation(&e) {
+            (StatusCode::BAD_REQUEST, "unknown feature_key".to_string())
+        } else {
+            db_err(e)
+        }
+    })?;
+    Ok(Json(after))
+}
+
+#[derive(Deserialize)]
+struct QuestionUpdate {
+    #[serde(default)]
+    section: Option<String>,
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    input_type: Option<String>,
+    #[serde(default)]
+    options: Option<serde_json::Value>,
+    #[serde(default)]
+    required: Option<bool>,
+    #[serde(default)]
+    active: Option<bool>,
+    #[serde(default)]
+    evidence_citation: Option<String>,
+    citation: String,
+}
+
+/// Update a question (admin): COALESCE the provided fields, bump version, write an audit event.
+async fn admin_update_question(
+    State(s): State<Arc<AppState>>,
+    Admin(admin): Admin,
+    AxumPath(code): AxumPath<String>,
+    Json(req): Json<QuestionUpdate>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    require_citation(&req.citation)?;
+    let after = db::admin_update_question(
+        &s.pool, admin, &code, req.section.as_deref(), req.text.as_deref(), req.input_type.as_deref(),
+        req.options.as_ref(), req.required, req.active, req.evidence_citation.as_deref(), &req.citation,
+    )
+    .await
+    .map_err(db_err)?
+    .ok_or((StatusCode::NOT_FOUND, format!("unknown question: {code}")))?;
+    Ok(Json(after))
 }
 
 /// The audit log (admin only), newest first.

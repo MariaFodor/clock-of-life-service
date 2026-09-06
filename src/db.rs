@@ -199,6 +199,112 @@ pub async fn get_profile(pool: &PgPool, account_id: Uuid) -> Result<Option<Profi
     .await
 }
 
+/// True if the error is a foreign-key violation (e.g. unknown feature_key) → map to 400/409.
+pub fn is_foreign_key_violation(e: &sqlx::Error) -> bool {
+    matches!(e, sqlx::Error::Database(db) if db.is_foreign_key_violation())
+}
+
+/// Append an audit event inside an existing transaction (keeps mutation + audit atomic).
+#[allow(clippy::too_many_arguments)]
+async fn audit_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    admin_id: Uuid,
+    entity: &str,
+    entity_id: &str,
+    action: &str,
+    before: Option<&Value>,
+    after: Option<&Value>,
+    citation: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO audit_event (admin_id, entity, entity_id, action, before, after, citation)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)",
+    )
+    .bind(admin_id).bind(entity).bind(entity_id).bind(action).bind(before).bind(after).bind(citation)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+/// Create a question AND its audit event atomically. Returns the new row as JSON.
+/// Duplicate code → unique violation; unknown feature_key → foreign-key violation.
+#[allow(clippy::too_many_arguments)]
+pub async fn admin_create_question(
+    pool: &PgPool,
+    admin_id: Uuid,
+    code: &str,
+    section: &str,
+    text: &str,
+    input_type: &str,
+    options: Option<&Value>,
+    feature_key: Option<&str>,
+    required: bool,
+    evidence_citation: Option<&str>,
+    citation: &str,
+) -> Result<Value, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let after: Value = sqlx::query_scalar(
+        "INSERT INTO question
+             (code, version, section, text, input_type, options, feature_key, required, active, evidence_citation)
+         VALUES ($1, 1, $2, $3, $4, $5, $6, $7, true, $8)
+         RETURNING to_jsonb(question)",
+    )
+    .bind(code).bind(section).bind(text).bind(input_type).bind(options)
+    .bind(feature_key).bind(required).bind(evidence_citation)
+    .fetch_one(&mut *tx)
+    .await?;
+    audit_in_tx(&mut tx, admin_id, "question", code, "create", None, Some(&after), citation).await?;
+    tx.commit().await?;
+    Ok(after)
+}
+
+/// Update a question (COALESCE partial + version bump) AND its audit event atomically.
+/// Returns the updated row as JSON, or None if the code is unknown (transaction rolled back).
+#[allow(clippy::too_many_arguments)]
+pub async fn admin_update_question(
+    pool: &PgPool,
+    admin_id: Uuid,
+    code: &str,
+    section: Option<&str>,
+    text: Option<&str>,
+    input_type: Option<&str>,
+    options: Option<&Value>,
+    required: Option<bool>,
+    active: Option<bool>,
+    evidence_citation: Option<&str>,
+    citation: &str,
+) -> Result<Option<Value>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let before: Option<Value> =
+        sqlx::query_scalar("SELECT to_jsonb(question) FROM question WHERE code = $1")
+            .bind(code)
+            .fetch_optional(&mut *tx)
+            .await?;
+    let Some(before) = before else {
+        return Ok(None); // tx dropped (rolled back)
+    };
+    let after: Value = sqlx::query_scalar(
+        "UPDATE question SET
+             section = COALESCE($2, section),
+             text = COALESCE($3, text),
+             input_type = COALESCE($4, input_type),
+             options = COALESCE($5, options),
+             required = COALESCE($6, required),
+             active = COALESCE($7, active),
+             evidence_citation = COALESCE($8, evidence_citation),
+             version = version + 1
+         WHERE code = $1
+         RETURNING to_jsonb(question)",
+    )
+    .bind(code).bind(section).bind(text).bind(input_type).bind(options)
+    .bind(required).bind(active).bind(evidence_citation)
+    .fetch_one(&mut *tx)
+    .await?;
+    audit_in_tx(&mut tx, admin_id, "question", code, "update", Some(&before), Some(&after), citation).await?;
+    tx.commit().await?;
+    Ok(Some(after))
+}
+
 /// Whether an account has the admin flag.
 pub async fn is_admin(pool: &PgPool, account_id: Uuid) -> Result<bool, sqlx::Error> {
     Ok(sqlx::query_scalar::<_, bool>("SELECT is_admin FROM account WHERE id = $1")

@@ -131,7 +131,8 @@ fn seeds_are_reconciled() {
         .fetch_one(&s.pool).await.unwrap();
     assert_eq!(features, 18, "18 features seeded");
 
-    let questions: i64 = sqlx::query_scalar("SELECT count(*) FROM question WHERE active")
+    // Exclude questions created by the admin-mutation test (shared DB, parallel).
+    let questions: i64 = sqlx::query_scalar("SELECT count(*) FROM question WHERE active AND code NOT LIKE 'Qtest%'")
         .fetch_one(&s.pool).await.unwrap();
     assert_eq!(questions, 24, "24 questions seeded");
 
@@ -397,7 +398,9 @@ fn questions_and_profile() {
     let resp = build_router(s.clone()).oneshot(get("/api/questions")).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let qs = body_json(resp).await;
-    let arr = qs.as_array().unwrap();
+    // Exclude any questions created by the admin-mutation test (shared DB, parallel).
+    let arr: Vec<&Value> = qs.as_array().unwrap().iter()
+        .filter(|q| !q["code"].as_str().unwrap().starts_with("Qtest")).collect();
     assert_eq!(arr.len(), 24, "24 questions served");
     assert_eq!(arr[0]["code"], "Q1_age");
     assert_eq!(arr[9]["code"], "Q10_sedentary", "numeric order (Q10 after Q9, not after Q1)");
@@ -514,6 +517,57 @@ fn admin_gate() {
     assert_eq!(resp.status(), StatusCode::OK);
     assert!(body_json(resp).await.is_array(), "audit log is a list");
     });
+}
+
+/// API-17: admin can create/update questions; version bumps; citation required; audit written.
+#[test]
+fn admin_question_mutations() {
+    RT.block_on(async {
+    let s = state().await;
+    let admin = register_admin(&s).await;
+    let put = |code: &str, body: Value| build_router(s.clone()).oneshot(post_auth_put(&format!("/api/admin/questions/{code}"), body, &admin));
+
+    // Citation is required.
+    assert_eq!(put("Q11_sleep", json!({"text": "x", "citation": ""})).await.unwrap().status(), StatusCode::BAD_REQUEST);
+
+    // Read current version, update, confirm version bumped + change applied.
+    let qs = body_json(build_router(s.clone()).oneshot(get("/api/questions")).await.unwrap()).await;
+    let v0 = qs.as_array().unwrap().iter().find(|q| q["code"] == "Q11_sleep").unwrap()["version"].as_i64().unwrap();
+    let resp = put("Q11_sleep", json!({"text": "On a typical night, how many hours do you sleep? (edited)", "citation": "ops: wording tweak"})).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(body_json(resp).await["version"].as_i64().unwrap(), v0 + 1, "version bumped");
+
+    // Unknown question → 404.
+    assert_eq!(put("Q999_nope", json!({"text": "x", "citation": "c"})).await.unwrap().status(), StatusCode::NOT_FOUND);
+
+    // Create a new question (unique code across runs), duplicate → 409.
+    let code = format!("Qtest_{}_{}", std::process::id(), COUNTER_CODE.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+    let create = json!({"code": code, "section": "Test", "text": "Test question?", "input_type": "number", "citation": "ops: new item"});
+    assert_eq!(build_router(s.clone()).oneshot(post_auth("/api/admin/questions", create.clone(), &admin)).await.unwrap().status(), StatusCode::OK);
+    assert_eq!(build_router(s.clone()).oneshot(post_auth("/api/admin/questions", create, &admin)).await.unwrap().status(), StatusCode::CONFLICT);
+
+    // The audit log records the mutations with citations.
+    let audit = body_json(build_router(s.clone()).oneshot(get_auth("/api/admin/audit", &admin)).await.unwrap()).await;
+    let entries = audit.as_array().unwrap();
+    assert!(entries.iter().any(|e| e["entity"] == "question" && e["action"] == "update"
+        && e["citation"].as_str().map(|c| !c.is_empty()).unwrap_or(false)), "update audited with citation");
+    assert!(entries.iter().any(|e| e["entity"] == "question" && e["action"] == "create"), "create audited");
+
+    // Clean up the created question so shared-DB count/order tests stay clean.
+    sqlx::query("DELETE FROM question WHERE code = $1").bind(&code).execute(&s.pool).await.unwrap();
+    });
+}
+
+static COUNTER_CODE: AtomicU64 = AtomicU64::new(0);
+
+fn post_auth_put(uri: &str, body: Value, token: &str) -> Request<Body> {
+    Request::builder()
+        .method("PUT")
+        .uri(uri)
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {token}"))
+        .body(Body::from(body.to_string()))
+        .unwrap()
 }
 
 /// API-14: relocate compares locations and explains air vs greenspace; symmetric; 404 on unknown.
