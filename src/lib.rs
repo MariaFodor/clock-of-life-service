@@ -108,6 +108,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/admin/audit", get(audit_route))
         .route("/api/admin/questions", post(admin_create_question))
         .route("/api/admin/questions/:code", put(admin_update_question))
+        .route("/api/admin/features/:key", put(admin_update_feature))
+        .route("/api/admin/rules", post(admin_create_rule))
+        .route("/api/admin/rules/:code", put(admin_update_rule))
         .with_state(state)
 }
 
@@ -735,6 +738,120 @@ async fn admin_update_question(
     .await
     .map_err(db_err)?
     .ok_or((StatusCode::NOT_FOUND, format!("unknown question: {code}")))?;
+    Ok(Json(after))
+}
+
+#[derive(Deserialize)]
+struct FeatureUpdate {
+    #[serde(default)] name: Option<String>,
+    #[serde(default)] role: Option<String>,
+    #[serde(default)] evidence_grade: Option<String>,
+    #[serde(default)] feature_citation: Option<String>,
+    #[serde(default)] formula_note: Option<String>,
+    #[serde(default)] active: Option<bool>,
+    citation: String,
+}
+
+/// Update a feature (admin): COALESCE the provided fields, write an audit event.
+async fn admin_update_feature(
+    State(s): State<Arc<AppState>>,
+    Admin(admin): Admin,
+    AxumPath(key): AxumPath<String>,
+    Json(req): Json<FeatureUpdate>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    require_citation(&req.citation)?;
+    let after = db::admin_update_feature(
+        &s.pool, admin, &key, req.name.as_deref(), req.role.as_deref(), req.evidence_grade.as_deref(),
+        req.feature_citation.as_deref(), req.formula_note.as_deref(), req.active, &req.citation,
+    )
+    .await
+    .map_err(|e| {
+        if db::is_check_violation(&e) {
+            (StatusCode::BAD_REQUEST, "invalid role or evidence_grade".to_string())
+        } else {
+            db_err(e)
+        }
+    })?
+    .ok_or((StatusCode::NOT_FOUND, format!("unknown feature: {key}")))?;
+    Ok(Json(after))
+}
+
+#[derive(Deserialize)]
+struct RuleCreate {
+    code: String,
+    feature_key: String,
+    condition: serde_json::Value,
+    message: String,
+    #[serde(default)] priority: i32,
+    /// The rule's own required evidence citation (NOT NULL).
+    evidence_citation: String,
+    /// Audit citation for this change.
+    citation: String,
+}
+
+/// Create a recommendation rule (admin). Duplicate code → 409; unknown feature_key → 400.
+async fn admin_create_rule(
+    State(s): State<Arc<AppState>>,
+    Admin(admin): Admin,
+    Json(req): Json<RuleCreate>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    require_citation(&req.citation)?;
+    if req.evidence_citation.trim().is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "evidence_citation is required for a rule".to_string()));
+    }
+    let after = db::admin_create_rule(
+        &s.pool, admin, &req.code, &req.feature_key, &req.condition, &req.message, req.priority,
+        &req.evidence_citation, &req.citation,
+    )
+    .await
+    .map_err(|e| {
+        if db::is_unique_violation(&e) {
+            (StatusCode::CONFLICT, "rule code already exists".to_string())
+        } else if db::is_foreign_key_violation(&e) {
+            (StatusCode::BAD_REQUEST, "unknown feature_key".to_string())
+        } else {
+            db_err(e)
+        }
+    })?;
+    Ok(Json(after))
+}
+
+#[derive(Deserialize)]
+struct RuleUpdate {
+    #[serde(default)] feature_key: Option<String>,
+    #[serde(default)] condition: Option<serde_json::Value>,
+    #[serde(default)] message: Option<String>,
+    #[serde(default)] priority: Option<i32>,
+    #[serde(default)] active: Option<bool>,
+    #[serde(default)] evidence_citation: Option<String>,
+    citation: String,
+}
+
+/// Update a recommendation rule (admin). Unknown code → 404; unknown feature_key → 400.
+async fn admin_update_rule(
+    State(s): State<Arc<AppState>>,
+    Admin(admin): Admin,
+    AxumPath(code): AxumPath<String>,
+    Json(req): Json<RuleUpdate>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    require_citation(&req.citation)?;
+    // A rule's evidence citation must never be blanked (evidence traceability).
+    if req.evidence_citation.as_deref().is_some_and(|c| c.trim().is_empty()) {
+        return Err((StatusCode::BAD_REQUEST, "evidence_citation cannot be blank".to_string()));
+    }
+    let after = db::admin_update_rule(
+        &s.pool, admin, &code, req.feature_key.as_deref(), req.condition.as_ref(), req.message.as_deref(),
+        req.priority, req.active, req.evidence_citation.as_deref(), &req.citation,
+    )
+    .await
+    .map_err(|e| {
+        if db::is_foreign_key_violation(&e) {
+            (StatusCode::BAD_REQUEST, "unknown feature_key".to_string())
+        } else {
+            db_err(e)
+        }
+    })?
+    .ok_or((StatusCode::NOT_FOUND, format!("unknown rule: {code}")))?;
     Ok(Json(after))
 }
 

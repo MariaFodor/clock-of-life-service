@@ -305,6 +305,119 @@ pub async fn admin_update_question(
     Ok(Some(after))
 }
 
+/// True if the error is a CHECK-constraint violation (e.g. invalid role/grade) → map to 400.
+pub fn is_check_violation(e: &sqlx::Error) -> bool {
+    matches!(e, sqlx::Error::Database(db) if db.is_check_violation())
+}
+
+/// Update a feature (COALESCE partial) AND its audit event atomically. None if the key is unknown.
+#[allow(clippy::too_many_arguments)]
+pub async fn admin_update_feature(
+    pool: &PgPool,
+    admin_id: Uuid,
+    key: &str,
+    name: Option<&str>,
+    role: Option<&str>,
+    evidence_grade: Option<&str>,
+    feature_citation: Option<&str>,
+    formula_note: Option<&str>,
+    active: Option<bool>,
+    audit_citation: &str,
+) -> Result<Option<Value>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let before: Option<Value> =
+        sqlx::query_scalar("SELECT to_jsonb(feature) FROM feature WHERE key = $1")
+            .bind(key)
+            .fetch_optional(&mut *tx)
+            .await?;
+    let Some(before) = before else { return Ok(None) };
+    let after: Value = sqlx::query_scalar(
+        "UPDATE feature SET
+             name = COALESCE($2, name),
+             role = COALESCE($3, role),
+             evidence_grade = COALESCE($4, evidence_grade),
+             citation = COALESCE($5, citation),
+             formula_note = COALESCE($6, formula_note),
+             active = COALESCE($7, active)
+         WHERE key = $1
+         RETURNING to_jsonb(feature)",
+    )
+    .bind(key).bind(name).bind(role).bind(evidence_grade).bind(feature_citation).bind(formula_note).bind(active)
+    .fetch_one(&mut *tx)
+    .await?;
+    audit_in_tx(&mut tx, admin_id, "feature", key, "update", Some(&before), Some(&after), audit_citation).await?;
+    tx.commit().await?;
+    Ok(Some(after))
+}
+
+/// Create a recommendation rule AND its audit event atomically. Duplicate code → unique violation;
+/// unknown feature_key → foreign-key violation.
+#[allow(clippy::too_many_arguments)]
+pub async fn admin_create_rule(
+    pool: &PgPool,
+    admin_id: Uuid,
+    code: &str,
+    feature_key: &str,
+    condition: &Value,
+    message: &str,
+    priority: i32,
+    evidence_citation: &str,
+    audit_citation: &str,
+) -> Result<Value, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let after: Value = sqlx::query_scalar(
+        "INSERT INTO recommendation_rule (code, feature_key, condition, message, priority, evidence_citation, active)
+         VALUES ($1, $2, $3, $4, $5, $6, true)
+         RETURNING to_jsonb(recommendation_rule)",
+    )
+    .bind(code).bind(feature_key).bind(condition).bind(message).bind(priority).bind(evidence_citation)
+    .fetch_one(&mut *tx)
+    .await?;
+    audit_in_tx(&mut tx, admin_id, "recommendation_rule", code, "create", None, Some(&after), audit_citation).await?;
+    tx.commit().await?;
+    Ok(after)
+}
+
+/// Update a recommendation rule (COALESCE partial) AND its audit event atomically. None if unknown.
+#[allow(clippy::too_many_arguments)]
+pub async fn admin_update_rule(
+    pool: &PgPool,
+    admin_id: Uuid,
+    code: &str,
+    feature_key: Option<&str>,
+    condition: Option<&Value>,
+    message: Option<&str>,
+    priority: Option<i32>,
+    active: Option<bool>,
+    evidence_citation: Option<&str>,
+    audit_citation: &str,
+) -> Result<Option<Value>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let before: Option<Value> =
+        sqlx::query_scalar("SELECT to_jsonb(recommendation_rule) FROM recommendation_rule WHERE code = $1")
+            .bind(code)
+            .fetch_optional(&mut *tx)
+            .await?;
+    let Some(before) = before else { return Ok(None) };
+    let after: Value = sqlx::query_scalar(
+        "UPDATE recommendation_rule SET
+             feature_key = COALESCE($2, feature_key),
+             condition = COALESCE($3, condition),
+             message = COALESCE($4, message),
+             priority = COALESCE($5, priority),
+             active = COALESCE($6, active),
+             evidence_citation = COALESCE($7, evidence_citation)
+         WHERE code = $1
+         RETURNING to_jsonb(recommendation_rule)",
+    )
+    .bind(code).bind(feature_key).bind(condition).bind(message).bind(priority).bind(active).bind(evidence_citation)
+    .fetch_one(&mut *tx)
+    .await?;
+    audit_in_tx(&mut tx, admin_id, "recommendation_rule", code, "update", Some(&before), Some(&after), audit_citation).await?;
+    tx.commit().await?;
+    Ok(Some(after))
+}
+
 /// Whether an account has the admin flag.
 pub async fn is_admin(pool: &PgPool, account_id: Uuid) -> Result<bool, sqlx::Error> {
     Ok(sqlx::query_scalar::<_, bool>("SELECT is_admin FROM account WHERE id = $1")

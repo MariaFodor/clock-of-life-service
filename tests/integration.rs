@@ -148,7 +148,7 @@ fn seeds_are_reconciled() {
     assert_eq!(dangling, 0, "no question points at a missing feature");
 
     // Recommendation rules (API-02): all seeded, evidence-cited, referencing real features.
-    let rules: i64 = sqlx::query_scalar("SELECT count(*) FROM recommendation_rule WHERE active")
+    let rules: i64 = sqlx::query_scalar("SELECT count(*) FROM recommendation_rule WHERE active AND code NOT LIKE 'Rtest%'")
         .fetch_one(&s.pool).await.unwrap();
     assert_eq!(rules, 7, "7 recommendation rules seeded");
     let uncited: i64 = sqlx::query_scalar(
@@ -432,7 +432,7 @@ fn every_factor_and_rule_resolves_to_a_study() {
     assert_eq!(feature_without_study, 0, "every kept factor is backed by a study");
 
     let rule_without_study: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM recommendation_rule r WHERE r.active
+        "SELECT count(*) FROM recommendation_rule r WHERE r.active AND r.code NOT LIKE 'Rtest%'
            AND NOT EXISTS (SELECT 1 FROM rule_study rs WHERE rs.rule_code = r.code)",
     ).fetch_one(&s.pool).await.unwrap();
     assert_eq!(rule_without_study, 0, "every rule is backed by a study");
@@ -499,6 +499,52 @@ fn env_is_lever_only_in_relocate() {
     let rel = body_json(build_router(s.clone())
         .oneshot(post("/api/relocate", json!({"base": dirty, "to": "Rural (national)"}))).await.unwrap()).await;
     assert!(rel["delta_years"].as_f64().unwrap() > 0.0, "moving to cleaner air adds years (env as lever)");
+    });
+}
+
+/// API-18: admin can edit features and create/update rules; invalid values → 400; all audited.
+#[test]
+fn admin_feature_and_rule_mutations() {
+    RT.block_on(async {
+    let s = state().await;
+    let admin = register_admin(&s).await;
+    let user = register_token(&s).await;
+
+    // Non-admin cannot edit a feature.
+    assert_eq!(
+        build_router(s.clone()).oneshot(post_auth_put("/api/admin/features/income", json!({"name": "x", "citation": "c"}), &user)).await.unwrap().status(),
+        StatusCode::FORBIDDEN);
+
+    // Edit a feature's citation (harmless to other tests).
+    let resp = build_router(s.clone()).oneshot(post_auth_put("/api/admin/features/income", json!({"feature_citation": "SES gradient (reviewed)", "citation": "ops: refine citation"}), &admin)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Invalid role → 400 (CHECK violation mapped).
+    assert_eq!(
+        build_router(s.clone()).oneshot(post_auth_put("/api/admin/features/income", json!({"role": "bogus", "citation": "c"}), &admin)).await.unwrap().status(),
+        StatusCode::BAD_REQUEST);
+
+    // Create a rule (unique code, never-matching condition), then update it. Unknown feature_key → 400.
+    let code = format!("Rtest_{}_{}", std::process::id(), COUNTER_CODE.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+    let create = json!({"code": code, "feature_key": "activity", "condition": {"field": "smoke", "op": "eq", "value": 99},
+                        "message": "test rule", "priority": 1, "evidence_citation": "test", "citation": "ops: new rule"});
+    assert_eq!(build_router(s.clone()).oneshot(post_auth("/api/admin/rules", create, &admin)).await.unwrap().status(), StatusCode::OK);
+
+    let bad_fk = json!({"code": format!("{code}_x"), "feature_key": "nope", "condition": {}, "message": "m", "evidence_citation": "e", "citation": "c"});
+    assert_eq!(build_router(s.clone()).oneshot(post_auth("/api/admin/rules", bad_fk, &admin)).await.unwrap().status(), StatusCode::BAD_REQUEST);
+
+    let upd = build_router(s.clone()).oneshot(post_auth_put(&format!("/api/admin/rules/{code}"), json!({"priority": 5, "citation": "ops: bump priority"}), &admin)).await.unwrap();
+    assert_eq!(upd.status(), StatusCode::OK);
+    assert_eq!(body_json(upd).await["priority"].as_i64().unwrap(), 5);
+
+    // Audit recorded feature + rule mutations.
+    let audit = body_json(build_router(s.clone()).oneshot(get_auth("/api/admin/audit", &admin)).await.unwrap()).await;
+    let e = audit.as_array().unwrap();
+    assert!(e.iter().any(|x| x["entity"] == "feature" && x["action"] == "update"));
+    assert!(e.iter().any(|x| x["entity"] == "recommendation_rule" && x["action"] == "create"));
+
+    // Clean up the created rule (shared DB).
+    sqlx::query("DELETE FROM recommendation_rule WHERE code = $1").bind(&code).execute(&s.pool).await.unwrap();
     });
 }
 
