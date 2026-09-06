@@ -51,10 +51,20 @@ pub struct Manifest {
     pub data_as_of: Option<String>,
 }
 
+/// Per-factor evidence shipped with the model (`evidence.json`): role, grade, and citation.
+#[derive(Deserialize, Clone, Default)]
+pub struct Evidence {
+    pub role: String,
+    pub grade: String,
+    pub citation: String,
+}
+
 pub struct Bundle {
     pub manifest: Manifest,
     pub coefficients: Coefficients,
     pub baselines: HashMap<String, Baseline>,
+    /// feature key -> {role, grade, citation}; empty if the bundle ships no evidence.json.
+    pub evidence: HashMap<String, Evidence>,
 }
 
 fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, String> {
@@ -86,11 +96,14 @@ impl Bundle {
         }
 
         let coefficients: Coefficients = read_json(&dir.join("coefficients.json"))?;
+        // Evidence is supplementary (powers the "Why?" citations); tolerate its absence.
+        let evidence: HashMap<String, Evidence> =
+            read_json(&dir.join("evidence.json")).unwrap_or_default();
         let mut baselines = HashMap::new();
         for iso in &manifest.countries {
             let b: Baseline = read_json(&dir.join("baselines").join(format!("{iso}.json")))?;
             baselines.insert(iso.clone(), b);
         }
-        Ok(Bundle { manifest, coefficients, baselines })
+        Ok(Bundle { manifest, coefficients, baselines, evidence })
     }
 }

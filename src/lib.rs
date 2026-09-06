@@ -26,7 +26,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use bundle::Bundle;
-use scoring::{estimate, whatif, Estimate, Profile, WhatIf, WhatIfChanges};
+use scoring::{attributions, estimate, whatif, Attribution, Estimate, Profile, WhatIf, WhatIfChanges};
 use sqlx::postgres::PgPool;
 
 /// Shared application state: the loaded model, the DB pool, and the ids resolved at reconciliation.
@@ -260,6 +260,10 @@ async fn login_route(
 struct EstimateResponse {
     #[serde(flatten)]
     estimate: Estimate,
+    /// Per-factor "Why?" breakdown (total-effect year deltas + evidence).
+    why: Vec<Attribution>,
+    /// Provenance of the model that produced this estimate (reproducibility).
+    model: serde_json::Value,
     calculation_id: Uuid,
 }
 
@@ -271,10 +275,16 @@ async fn estimate_route(
     Json(profile): Json<Profile>,
 ) -> Result<Json<EstimateResponse>, (StatusCode, String)> {
     let est = estimate(&s.bundle, &profile).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let why = attributions(&s.bundle, &profile).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     let inputs = serde_json::to_value(&profile)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialize inputs: {e}")))?;
-    // Per-factor attributions are a later surface ("Why?"); the v1 estimate stores an empty list.
-    let attributions = json!([]);
+    let attributions_json = serde_json::to_value(&why)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialize why: {e}")))?;
+    let model = json!({
+        "version": s.bundle.manifest.version,
+        "algorithm": s.bundle.manifest.algorithm,
+        "reference_population": s.bundle.manifest.reference_population,
+    });
     let owner = account.unwrap_or(s.anon_account_id);
     let id = db::insert_calculation(
         &s.pool,
@@ -287,11 +297,11 @@ async fn estimate_route(
         est.interval[1],
         est.reaches_age,
         est.relative_risk,
-        &attributions,
+        &attributions_json,
     )
     .await
     .map_err(db_err)?;
-    Ok(Json(EstimateResponse { estimate: est, calculation_id: id }))
+    Ok(Json(EstimateResponse { estimate: est, why, model, calculation_id: id }))
 }
 
 #[derive(Deserialize)]

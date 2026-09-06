@@ -157,6 +157,86 @@ pub fn estimate(bundle: &Bundle, p: &Profile) -> Result<Estimate, String> {
 
 fn round1(x: f64) -> f64 { (x * 10.0).round() / 10.0 }
 
+/// One factor's contribution to the estimate, for the "Why?" surface.
+#[derive(Serialize)]
+pub struct Attribution {
+    pub factor: String,
+    /// Years this factor adds (+) or costs (-) vs its reference level (cohort mean for z-scored
+    /// continuous factors, or the factor being absent for binary factors).
+    pub delta_years: f64,
+    pub role: String,
+    pub evidence: String, // evidence grade
+    pub citation: String,
+}
+
+/// Main-effect design keys (age-interaction `*_x_young` terms excluded) with user-facing labels.
+const FACTORS: &[(&str, &str)] = &[
+    ("smk_former", "Former smoking"),
+    ("smk_current", "Current smoking"),
+    ("activity", "Physical activity"),
+    ("sleep_long", "Long sleep"),
+    ("waist", "Waist circumference"),
+    ("diabetes", "Diabetes"),
+    ("high_bp", "High blood pressure"),
+    ("respiratory", "Respiratory disease"),
+    ("mobility", "Mobility limitation"),
+    ("cvd_hx", "Cardiovascular history"),
+    ("cancer_hx", "Cancer history"),
+    ("education", "Education"),
+    ("income", "Income"),
+];
+
+/// Per-factor "Why?" attribution: for each factor the user deviates from the reference on, the year
+/// delta of removing that factor's contribution. Levers use the TOTAL-EFFECT (attribution)
+/// coefficients so they read honestly; manage/context factors (no attribution term) fall back to the
+/// fitted prediction coefficient. Main effects only — the `*_x_young` terms are excluded (EXP-01).
+/// Sorted by magnitude. `mobility` is listed but is always 0 in the v1 estimate design (see `design`).
+pub fn attributions(bundle: &Bundle, p: &Profile) -> Result<Vec<Attribution>, String> {
+    p.validate()?;
+    let (base_rr, base) = risk(bundle, p)?;
+    let qx = base.qx.get(&p.sex).ok_or_else(|| format!("no qx for sex {}", p.sex))?;
+    let age = p.age.round() as i64;
+    let years_actual = remaining_le(qx, age, base_rr);
+    let d0 = design(p, &bundle.coefficients);
+    let attr = &bundle.coefficients.attribution;
+
+    let mut out = Vec::new();
+    for (key, label) in FACTORS {
+        let x = d0.get(*key).copied().unwrap_or(0.0);
+        if x == 0.0 {
+            continue; // no deviation from the reference on this factor
+        }
+        // Total-effect coefficient for the levers; fitted (prediction) coefficient for the
+        // manage/context factors, which have no separate attribution term.
+        let c = match attr.get(*key).or_else(|| bundle.coefficients.prediction.get(*key)) {
+            Some(c) => *c,
+            None => continue,
+        };
+        let d_lp = c * x;
+        let rr_without = base_rr * (-d_lp).exp(); // remove this factor's contribution
+        let years_without = remaining_le(qx, age, rr_without);
+        let delta = years_actual - years_without;
+        if delta.abs() < 0.05 {
+            continue; // negligible — don't clutter the Why? list
+        }
+        let ev = bundle.evidence.get(*key);
+        out.push(Attribution {
+            factor: label.to_string(),
+            delta_years: round1(delta),
+            role: ev.map(|e| e.role.clone()).unwrap_or_default(),
+            evidence: ev.map(|e| e.grade.clone()).unwrap_or_default(),
+            citation: ev.map(|e| e.citation.clone()).unwrap_or_default(),
+        });
+    }
+    out.sort_by(|a, b| {
+        b.delta_years
+            .abs()
+            .partial_cmp(&a.delta_years.abs())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    Ok(out)
+}
+
 /// A lifestyle change to explore. Only modifiable levers may change (manage/context/baseline are fixed).
 #[derive(Deserialize, Serialize)]
 pub struct WhatIfChanges {
@@ -280,5 +360,29 @@ mod tests {
         assert!(bad(&|p| p.waist = 5.0), "implausible waist rejected");
         assert!(bad(&|p| p.sex = "X".into()), "bad sex rejected");
         assert!(bad(&|p| p.sleep = 30.0), "impossible sleep rejected");
+    }
+
+    #[test]
+    fn attributions_explain_a_high_risk_profile() {
+        let b = bundle();
+        let p = Profile {
+            country: "RO".into(), age: 55.0, sex: "M".into(), smoke: 2, pa_min: 0.0, sleep: 7.0,
+            waist: 115.0, diabetes: true, high_bp: true, respiratory: false, cvd_hx: false,
+            cancer_hx: false, higher_educ: true, income: 4.0,
+        };
+        let why = attributions(&b, &p).unwrap();
+        assert!(!why.is_empty(), "a high-risk profile should have explanatory factors");
+
+        // Sorted by descending magnitude.
+        for pair in why.windows(2) {
+            assert!(pair[0].delta_years.abs() >= pair[1].delta_years.abs(), "sorted by |delta|");
+        }
+        // Manage/context factors appear too (prediction-coefficient fallback), not only levers.
+        let smoking = why.iter().find(|a| a.factor == "Current smoking").expect("smoking present");
+        assert!(smoking.delta_years < 0.0, "current smoking costs years");
+        assert_eq!(smoking.evidence, "strong");
+        assert!(why.iter().any(|a| a.factor == "Diabetes" && a.delta_years < 0.0), "diabetes explained");
+        // A protective factor reads positive.
+        assert!(why.iter().any(|a| a.factor == "Education" && a.delta_years > 0.0), "education adds years");
     }
 }
