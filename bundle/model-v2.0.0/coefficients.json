@@ -1,0 +1,87 @@
+{
+  "prediction": {
+    "smk_former": 0.585060336839001,
+    "smk_current": 0.7121700921693463,
+    "activity": -0.3978369947915561,
+    "sleep_long": 0.46937117416619295,
+    "waist": -0.13623982977001237,
+    "diabetes": 0.3002788031304224,
+    "high_bp": 0.6662187464501717,
+    "respiratory": 0.26810878829526125,
+    "mobility": 0.3163409788863657,
+    "cvd_hx": 0.7731277345767201,
+    "cancer_hx": 0.7542636250703159,
+    "education": -0.17233597140284457,
+    "income": -0.13270212024945233,
+    "smk_current_x_young": -1.0950589280943588,
+    "activity_x_young": 0.3062616532136827,
+    "waist_x_young": 0.11645223847229577
+  },
+  "attribution": {
+    "smk_former": 0.8306823520447206,
+    "smk_current": 1.1177921355658051,
+    "activity": -0.6410662481952334,
+    "sleep_long": 0.581951752329809,
+    "waist": 0.05958153031904077,
+    "smk_current_x_young": -1.3929428581755017,
+    "activity_x_young": 0.4634211491082035,
+    "waist_x_young": 0.057562854158636996
+  },
+  "standardizer": {
+    "activity": {
+      "mean": 4.629776223791129,
+      "sd": 2.9744461926378754
+    },
+    "waist": {
+      "mean": 98.83248580073253,
+      "sd": 16.276964722810213
+    },
+    "income": {
+      "mean": 2.486683475768353,
+      "sd": 1.63858124918941
+    }
+  },
+  "literature": {
+    "diet": {
+      "beta": -0.15,
+      "grade": "strong",
+      "kind": "continuous_z",
+      "citation": "Trichopoulou 2003 (Mediterranean diet score); PREDIMED",
+      "note": "per +1 SD of Mediterranean-style diet score; higher = lower risk"
+    },
+    "sedentary": {
+      "beta": 0.08,
+      "grade": "moderate",
+      "kind": "continuous_z",
+      "citation": "Chau 2013 sitting-time meta-analysis",
+      "note": "per +1 SD sitting hours; modelled jointly with activity (offset is real)"
+    },
+    "stress": {
+      "beta": 0.05,
+      "grade": "weak",
+      "kind": "continuous_z",
+      "citation": "Cohen 1983 PSS; perceived-stress mortality cohorts",
+      "note": "per +1 SD perceived stress; low confidence"
+    },
+    "alcohol": {
+      "kind": "categorical_monotonic",
+      "grade": "strong_for_harm",
+      "citation": "GBD 2018/2020; Mendelian randomization (no safe level)",
+      "levels": {
+        "none": 0.0,
+        "light": 0.03,
+        "moderate": 0.12,
+        "heavy": 0.3
+      },
+      "note": "monotonic non-decreasing; never protective (J-curve refuted)"
+    },
+    "env": {
+      "kind": "precomputed",
+      "beta": 1.0,
+      "grade": "moderate",
+      "citation": "WHO AQG (PM2.5 RR 1.095/10\u00b5g); Rojas-Rueda 2019 (greenspace)",
+      "note": "service computes ENV = ln(1.095)*(PM25-ref)/10 + ln(0.965)*(NDVI-ref)/0.1; coef 1.0"
+    }
+  },
+  "young_cutoff": 55
+}
