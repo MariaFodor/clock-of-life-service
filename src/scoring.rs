@@ -20,6 +20,9 @@ pub struct Profile {
     pub pa_min: f64, // weekly MET-minutes
     pub sleep: f64,  // hours
     pub waist: f64,  // cm
+    #[serde(default = "default_bmi")] pub bmi: f64,       // body-mass index (kg/m²), from height + weight
+    #[serde(default)] pub cigs_day: f64,                  // current-smoker cigarettes/day (0 if not current)
+    #[serde(default)] pub sbp: Option<f64>,               // systolic BP (mmHg) if known; else derived from high_bp
     #[serde(default)] pub diabetes: bool,
     #[serde(default)] pub high_bp: bool,
     #[serde(default)] pub respiratory: bool,
@@ -31,6 +34,8 @@ pub struct Profile {
     #[serde(default)] pub ndvi: Option<f64>, // home greenspace NDVI (from location)
 }
 fn default_income() -> f64 { 2.5 }
+// Cohort-mean BMI, used only when a legacy client omits it (the questionnaire always sends height+weight).
+fn default_bmi() -> f64 { 27.0 }
 
 // ENV term (RES-04): a location's log-hazard contribution vs the national-average reference. Illustrative
 // RO reference — must be re-sourced with real RO PM2.5/NDVI layers before the relocation surface ships.
@@ -64,6 +69,11 @@ impl Profile {
             return Err("sleep must be between 0 and 24 hours".into());
         }
         rng("waist", self.waist, 40.0, 250.0)?;
+        rng("bmi", self.bmi, 12.0, 70.0)?;
+        rng("cigs_day", self.cigs_day, 0.0, 80.0)?;
+        if let Some(sbp) = self.sbp {
+            rng("sbp", sbp, 70.0, 240.0)?;
+        }
         rng("income", self.income, 0.0, 20.0)?;
         if let Some(pm25) = self.pm25 {
             rng("pm25", pm25, 0.0, 500.0)?;
@@ -98,6 +108,14 @@ pub fn design(p: &Profile, coefs: &Coefficients) -> HashMap<String, f64> {
     let mut d = HashMap::new();
     d.insert("smk_former".into(), if p.smoke == 1 { 1.0 } else { 0.0 });
     d.insert("smk_current".into(), smk_current);
+    // Current-smoker dose: 0 for never/former (matches the training encoding in config/features.py).
+    let cigs = if p.smoke == 2 { p.cigs_day } else { 0.0 };
+    d.insert("cigs_day".into(), z(cigs, coefs, "cigs_day"));
+    d.insert("bmi".into(), z(p.bmi, coefs, "bmi"));
+    // Systolic BP: a real reading when known; otherwise derived from the high-BP answer
+    // (NHANES hbp-conditional means), so the field refines rather than duplicates high_bp.
+    let sbp = p.sbp.unwrap_or(if p.high_bp { 132.7 } else { 117.9 });
+    d.insert("sbp".into(), z(sbp, coefs, "sbp"));
     d.insert("activity".into(), activity);
     d.insert("sleep_long".into(), if p.sleep >= 8.5 { 1.0 } else { 0.0 });
     d.insert("waist".into(), waist);
@@ -384,7 +402,7 @@ mod tests {
     use std::path::Path;
 
     fn bundle() -> Bundle {
-        Bundle::load(Path::new("bundle/model-v2.0.0")).expect("bundle loads")
+        Bundle::load(Path::new("bundle/model-v2.1.0")).expect("bundle loads")
     }
 
     #[test]
@@ -405,7 +423,7 @@ mod tests {
         let b = bundle();
         let base = |smoke, pa, waist, diab| Profile {
             country: "RO".into(), age: 40.0, sex: "M".into(), smoke, pa_min: pa, sleep: 7.0,
-            waist, diabetes: diab, high_bp: diab, respiratory: false, cvd_hx: false, cancer_hx: false,
+            waist, bmi: 27.0, cigs_day: 0.0, sbp: None, diabetes: diab, high_bp: diab, respiratory: false, cvd_hx: false, cancer_hx: false,
             higher_educ: true, income: 4.0, pm25: None, ndvi: None,
         };
         let healthy = estimate(&b, &base(0, 2000.0, 85.0, false)).unwrap();
@@ -424,7 +442,7 @@ mod tests {
     fn rejects_bad_input() {
         let b = bundle();
         let ok = Profile { country: "RO".into(), age: 40.0, sex: "M".into(), smoke: 0, pa_min: 300.0,
-            sleep: 7.0, waist: 90.0, diabetes: false, high_bp: false, respiratory: false, cvd_hx: false,
+            sleep: 7.0, waist: 90.0, bmi: 27.0, cigs_day: 0.0, sbp: None, diabetes: false, high_bp: false, respiratory: false, cvd_hx: false,
             cancer_hx: false, higher_educ: false, income: 2.5, pm25: None, ndvi: None };
         assert!(estimate(&b, &ok).is_ok());
         let bad = |f: &dyn Fn(&mut Profile)| { let mut p = ok.clone(); f(&mut p); estimate(&b, &p).is_err() };
@@ -448,7 +466,7 @@ mod tests {
         let b = bundle();
         let at = |pm25, ndvi| Profile {
             country: "RO".into(), age: 45.0, sex: "M".into(), smoke: 0, pa_min: 600.0, sleep: 7.0,
-            waist: 90.0, diabetes: false, high_bp: false, respiratory: false, cvd_hx: false,
+            waist: 90.0, bmi: 27.0, cigs_day: 0.0, sbp: None, diabetes: false, high_bp: false, respiratory: false, cvd_hx: false,
             cancer_hx: false, higher_educ: false, income: 2.5,
             pm25: Some(pm25), ndvi: Some(ndvi),
         };
@@ -462,7 +480,7 @@ mod tests {
     fn condition_evaluation() {
         let p = Profile {
             country: "RO".into(), age: 55.0, sex: "M".into(), smoke: 2, pa_min: 100.0, sleep: 9.0,
-            waist: 110.0, diabetes: true, high_bp: false, respiratory: false, cvd_hx: false,
+            waist: 110.0, bmi: 30.0, cigs_day: 20.0, sbp: Some(150.0), diabetes: true, high_bp: false, respiratory: false, cvd_hx: false,
             cancer_hx: false, higher_educ: false, income: 2.5, pm25: None, ndvi: None,
         };
         use serde_json::json;
@@ -483,7 +501,7 @@ mod tests {
         let b = bundle();
         let p = Profile {
             country: "RO".into(), age: 55.0, sex: "M".into(), smoke: 2, pa_min: 0.0, sleep: 7.0,
-            waist: 115.0, diabetes: true, high_bp: true, respiratory: false, cvd_hx: false,
+            waist: 115.0, bmi: 32.0, cigs_day: 20.0, sbp: Some(160.0), diabetes: true, high_bp: true, respiratory: false, cvd_hx: false,
             cancer_hx: false, higher_educ: true, income: 4.0, pm25: None, ndvi: None,
         };
         let why = attributions(&b, &p).unwrap();

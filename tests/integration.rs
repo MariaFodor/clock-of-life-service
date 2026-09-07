@@ -37,7 +37,7 @@ static COUNTER: AtomicU64 = AtomicU64::new(0);
 async fn state() -> Arc<AppState> {
     STATE
         .get_or_init(|| async {
-            let s = init_state("bundle/model-v2.0.0", &test_db_url())
+            let s = init_state("bundle/model-v2.1.0", &test_db_url())
                 .await
                 .expect("init_state (is PostgreSQL running and clock_of_life_test present?)");
             sqlx::query("TRUNCATE scenario, calculation, answer RESTART IDENTITY CASCADE")
@@ -261,7 +261,7 @@ fn estimate_why_and_context_not_recommended() {
     let est = body_json(resp).await;
 
     // model provenance block.
-    assert_eq!(est["model"]["version"], "2.0.0");
+    assert_eq!(est["model"]["version"], "2.1.0");
     assert!(est["model"]["algorithm"].as_str().is_some());
     // why[] present, populated, each entry well-formed and sensibly signed.
     let why = est["why"].as_array().expect("why[] present");
