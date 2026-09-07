@@ -110,22 +110,22 @@ async fn body_json(resp: axum::response::Response) -> Value {
     serde_json::from_slice(&bytes).unwrap()
 }
 
+/// Drive one request through a fresh router. Centralizing the single `oneshot` monomorphization here
+/// (instead of ~90 inline call-sites) keeps the test binary small and fast to compile.
+async fn call(s: &Arc<AppState>, req: Request<Body>) -> axum::response::Response {
+    build_router(s.clone()).oneshot(req).await.unwrap()
+}
+
 /// Register a fresh unique account and return its bearer token.
 async fn register_token(s: &Arc<AppState>) -> String {
-    let resp = build_router(s.clone())
-        .oneshot(post("/api/auth/register", json!({"email": unique_email(), "password": "password123"})))
-        .await
-        .unwrap();
+    let resp = call(s, post("/api/auth/register", json!({"email": unique_email(), "password": "password123"}))).await;
     assert_eq!(resp.status(), StatusCode::OK, "register should succeed");
     body_json(resp).await["token"].as_str().unwrap().to_string()
 }
 
 /// Register a fresh account, promote it to admin (via SQL), and return its bearer token.
 async fn register_admin(s: &Arc<AppState>) -> String {
-    let resp = build_router(s.clone())
-        .oneshot(post("/api/auth/register", json!({"email": unique_email(), "password": "password123"})))
-        .await
-        .unwrap();
+    let resp = call(s, post("/api/auth/register", json!({"email": unique_email(), "password": "password123"}))).await;
     let body = body_json(resp).await;
     let token = body["token"].as_str().unwrap().to_string();
     let account_id = body["account_id"].as_str().unwrap().to_string();
@@ -190,31 +190,28 @@ fn auth_register_login_roundtrip() {
     let email = unique_email();
     let creds = json!({"email": email, "password": "password123"});
 
-    let resp = build_router(s.clone()).oneshot(post("/api/auth/register", creds.clone())).await.unwrap();
+    let resp = call(&s, post("/api/auth/register", creds.clone())).await;
     assert_eq!(resp.status(), StatusCode::OK);
     assert!(body_json(resp).await["token"].as_str().is_some());
 
     // Duplicate registration -> 409.
-    let resp = build_router(s.clone()).oneshot(post("/api/auth/register", creds.clone())).await.unwrap();
+    let resp = call(&s, post("/api/auth/register", creds.clone())).await;
     assert_eq!(resp.status(), StatusCode::CONFLICT);
 
     // Too-short password -> 400.
-    let resp = build_router(s.clone())
-        .oneshot(post("/api/auth/register", json!({"email": unique_email(), "password": "short"}))).await.unwrap();
+    let resp = call(&s, post("/api/auth/register", json!({"email": unique_email(), "password": "short"}))).await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 
     // Correct login -> token.
-    let resp = build_router(s.clone()).oneshot(post("/api/auth/login", creds)).await.unwrap();
+    let resp = call(&s, post("/api/auth/login", creds)).await;
     assert_eq!(resp.status(), StatusCode::OK);
 
     // Wrong password -> 401.
-    let resp = build_router(s.clone())
-        .oneshot(post("/api/auth/login", json!({"email": email, "password": "wrongpass1"}))).await.unwrap();
+    let resp = call(&s, post("/api/auth/login", json!({"email": email, "password": "wrongpass1"}))).await;
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 
     // Unknown user -> 401 (same as wrong password).
-    let resp = build_router(s.clone())
-        .oneshot(post("/api/auth/login", json!({"email": unique_email(), "password": "whatever1"}))).await.unwrap();
+    let resp = call(&s, post("/api/auth/login", json!({"email": unique_email(), "password": "whatever1"}))).await;
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     });
 }
@@ -224,9 +221,9 @@ fn auth_register_login_roundtrip() {
 fn protected_routes_require_auth() {
     RT.block_on(async {
     let s = state().await;
-    assert_eq!(build_router(s.clone()).oneshot(get("/api/calculations")).await.unwrap().status(), StatusCode::UNAUTHORIZED);
-    assert_eq!(build_router(s.clone()).oneshot(get("/api/answers")).await.unwrap().status(), StatusCode::UNAUTHORIZED);
-    let bad_token = build_router(s.clone()).oneshot(get_auth("/api/calculations", "not.a.jwt")).await.unwrap();
+    assert_eq!(call(&s, get("/api/calculations")).await.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(call(&s, get("/api/answers")).await.status(), StatusCode::UNAUTHORIZED);
+    let bad_token = call(&s, get_auth("/api/calculations", "not.a.jwt")).await;
     assert_eq!(bad_token.status(), StatusCode::UNAUTHORIZED, "garbage token rejected");
     });
 }
@@ -237,12 +234,12 @@ fn estimate_persists_and_history_reads_back() {
     RT.block_on(async {
     let s = state().await;
     let token = register_token(&s).await;
-    let resp = build_router(s.clone()).oneshot(post_auth("/api/estimate", valid_profile(), &token)).await.unwrap();
+    let resp = call(&s, post_auth("/api/estimate", valid_profile(), &token)).await;
     assert_eq!(resp.status(), StatusCode::OK);
     let est = body_json(resp).await;
     let calc_id = est["calculation_id"].as_str().expect("calculation_id returned").to_string();
 
-    let resp = build_router(s.clone()).oneshot(get_auth("/api/calculations", &token)).await.unwrap();
+    let resp = call(&s, get_auth("/api/calculations", &token)).await;
     assert_eq!(resp.status(), StatusCode::OK);
     let history = body_json(resp).await;
     let rows = history.as_array().expect("history is an array");
@@ -260,7 +257,7 @@ fn estimate_why_and_context_not_recommended() {
     let s = state().await;
     let high = json!({"country": "RO", "age": 55, "sex": "M", "smoke": 2, "pa_min": 0, "sleep": 7,
                       "waist": 115, "diabetes": true});
-    let resp = build_router(s.clone()).oneshot(post("/api/estimate", high)).await.unwrap();
+    let resp = call(&s, post("/api/estimate", high)).await;
     let est = body_json(resp).await;
 
     // model provenance block.
@@ -280,7 +277,7 @@ fn estimate_why_and_context_not_recommended() {
     // A profile whose only deviation is a CONTEXT factor (cardiovascular history) gets no recommendation.
     let context_only = json!({"country": "RO", "age": 40, "sex": "F", "smoke": 0, "pa_min": 2000,
                               "sleep": 7, "waist": 78, "cvd_hx": true});
-    let resp = build_router(s.clone()).oneshot(post("/api/recommendations", context_only)).await.unwrap();
+    let resp = call(&s, post("/api/recommendations", context_only)).await;
     let recs = body_json(resp).await;
     assert_eq!(recs.as_array().unwrap().len(), 0, "context factors are explained, never recommended");
     });
@@ -291,7 +288,7 @@ fn estimate_why_and_context_not_recommended() {
 fn anonymous_estimate_still_works() {
     RT.block_on(async {
     let s = state().await;
-    let resp = build_router(s.clone()).oneshot(post("/api/estimate", valid_profile())).await.unwrap();
+    let resp = call(&s, post("/api/estimate", valid_profile())).await;
     assert_eq!(resp.status(), StatusCode::OK);
     assert!(body_json(resp).await["calculation_id"].as_str().is_some());
     });
@@ -303,11 +300,11 @@ fn whatif_persists_scenario() {
     RT.block_on(async {
     let s = state().await;
     let token = register_token(&s).await;
-    let resp = build_router(s.clone()).oneshot(post_auth("/api/estimate", valid_profile(), &token)).await.unwrap();
+    let resp = call(&s, post_auth("/api/estimate", valid_profile(), &token)).await;
     let base_id = body_json(resp).await["calculation_id"].as_str().unwrap().to_string();
 
     let req = json!({"base": valid_profile(), "changes": {"pa_min": 2000}, "base_calculation_id": base_id});
-    let resp = build_router(s.clone()).oneshot(post_auth("/api/whatif", req, &token)).await.unwrap();
+    let resp = call(&s, post_auth("/api/whatif", req, &token)).await;
     assert_eq!(resp.status(), StatusCode::OK);
     let wi = body_json(resp).await;
     let scenario_id = wi["scenario_id"].as_str().expect("scenario persisted").to_string();
@@ -327,15 +324,15 @@ fn whatif_scenario_requires_ownership() {
     let s = state().await;
     let token_a = register_token(&s).await;
     let token_b = register_token(&s).await;
-    let resp = build_router(s.clone()).oneshot(post_auth("/api/estimate", valid_profile(), &token_a)).await.unwrap();
+    let resp = call(&s, post_auth("/api/estimate", valid_profile(), &token_a)).await;
     let base_id = body_json(resp).await["calculation_id"].as_str().unwrap().to_string();
 
     let req = json!({"base": valid_profile(), "changes": {"pa_min": 2000}, "base_calculation_id": base_id});
     // B cannot fork A's calculation.
-    let resp = build_router(s.clone()).oneshot(post_auth("/api/whatif", req.clone(), &token_b)).await.unwrap();
+    let resp = call(&s, post_auth("/api/whatif", req.clone(), &token_b)).await;
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     // Unauthenticated cannot persist a scenario.
-    let resp = build_router(s.clone()).oneshot(post("/api/whatif", req)).await.unwrap();
+    let resp = call(&s, post("/api/whatif", req)).await;
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     });
 }
@@ -347,7 +344,7 @@ fn recommendations_rank_and_scope() {
     let s = state().await;
     let high = json!({"country": "RO", "age": 55, "sex": "M", "smoke": 2, "pa_min": 0, "sleep": 9,
                       "waist": 115, "diabetes": true, "high_bp": true});
-    let resp = build_router(s.clone()).oneshot(post("/api/recommendations", high)).await.unwrap();
+    let resp = call(&s, post("/api/recommendations", high)).await;
     assert_eq!(resp.status(), StatusCode::OK);
     let recs = body_json(resp).await;
     let arr = recs.as_array().expect("array");
@@ -367,7 +364,7 @@ fn recommendations_rank_and_scope() {
     // A healthy profile triggers no rules.
     let healthy = json!({"country": "RO", "age": 40, "sex": "F", "smoke": 0, "pa_min": 2000,
                          "sleep": 7, "waist": 78});
-    let resp = build_router(s.clone()).oneshot(post("/api/recommendations", healthy)).await.unwrap();
+    let resp = call(&s, post("/api/recommendations", healthy)).await;
     let recs = body_json(resp).await;
     assert_eq!(recs.as_array().unwrap().len(), 0, "healthy profile gets no recommendations");
     });
@@ -379,7 +376,7 @@ fn whatif_overlay_only_when_no_base() {
     RT.block_on(async {
     let s = state().await;
     let req = json!({"base": valid_profile(), "changes": {"smoke": 0}});
-    let resp = build_router(s.clone()).oneshot(post("/api/whatif", req)).await.unwrap();
+    let resp = call(&s, post("/api/whatif", req)).await;
     assert_eq!(resp.status(), StatusCode::OK);
     let wi = body_json(resp).await;
     assert!(wi.get("scenario_id").is_none(), "no scenario id without a base calculation");
@@ -393,13 +390,13 @@ fn answers_upsert_and_readback() {
     let s = state().await;
     let token = register_token(&s).await;
     let first = json!({"answers": [{"question_code": "Q5_smoking", "value": "Yes, currently"}]});
-    assert_eq!(build_router(s.clone()).oneshot(post_auth("/api/answers", first, &token)).await.unwrap().status(), StatusCode::OK);
+    assert_eq!(call(&s, post_auth("/api/answers", first, &token)).await.status(), StatusCode::OK);
 
     // Re-answering the same question updates in place (no duplicate row).
     let second = json!({"answers": [{"question_code": "Q5_smoking", "value": "No, never"}]});
-    assert_eq!(build_router(s.clone()).oneshot(post_auth("/api/answers", second, &token)).await.unwrap().status(), StatusCode::OK);
+    assert_eq!(call(&s, post_auth("/api/answers", second, &token)).await.status(), StatusCode::OK);
 
-    let resp = build_router(s.clone()).oneshot(get_auth("/api/answers", &token)).await.unwrap();
+    let resp = call(&s, get_auth("/api/answers", &token)).await;
     let answers = body_json(resp).await;
     let q5: Vec<&Value> = answers.as_array().unwrap().iter()
         .filter(|a| a["question_code"] == "Q5_smoking").collect();
@@ -414,7 +411,7 @@ fn questions_and_profile() {
     RT.block_on(async {
     let s = state().await;
     // Questions: public (no auth), all 24, ordered Q1..Q24 by numeric code.
-    let resp = build_router(s.clone()).oneshot(get("/api/questions")).await.unwrap();
+    let resp = call(&s, get("/api/questions")).await;
     assert_eq!(resp.status(), StatusCode::OK);
     let qs = body_json(resp).await;
     // Exclude any questions created by the admin-mutation test (shared DB, parallel).
@@ -425,12 +422,10 @@ fn questions_and_profile() {
     assert_eq!(arr[9]["code"], "Q10_sedentary", "numeric order (Q10 after Q9, not after Q1)");
 
     // Profile: requires auth, returns the caller's saved answers.
-    assert_eq!(build_router(s.clone()).oneshot(get("/api/profile")).await.unwrap().status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(call(&s, get("/api/profile")).await.status(), StatusCode::UNAUTHORIZED);
     let token = register_token(&s).await;
-    build_router(s.clone())
-        .oneshot(post_auth("/api/answers", json!({"answers": [{"question_code": "Q11_sleep", "value": "7-8"}]}), &token))
-        .await.unwrap();
-    let resp = build_router(s.clone()).oneshot(get_auth("/api/profile", &token)).await.unwrap();
+    call(&s, post_auth("/api/answers", json!({"answers": [{"question_code": "Q11_sleep", "value": "7-8"}]}), &token)).await;
+    let resp = call(&s, get_auth("/api/profile", &token)).await;
     assert_eq!(resp.status(), StatusCode::OK);
     let profile = body_json(resp).await;
     assert!(profile["profile_id"].as_str().is_some());
@@ -480,7 +475,7 @@ fn references_wired_into_why_and_recommendations() {
     let high = json!({"country": "RO", "age": 55, "sex": "M", "smoke": 2, "pa_min": 0, "sleep": 7,
                       "waist": 115, "diabetes": true});
 
-    let est = body_json(build_router(s.clone()).oneshot(post("/api/estimate", high.clone())).await.unwrap()).await;
+    let est = body_json(call(&s, post("/api/estimate", high.clone())).await).await;
     let why = est["why"].as_array().unwrap();
     let smoking = why.iter().find(|w| w["key"] == "smk_current").expect("smoking factor");
     let refs = smoking["references"].as_array().expect("references array");
@@ -488,7 +483,7 @@ fn references_wired_into_why_and_recommendations() {
     // Reference is openable: a DOI or an internal review slug.
     assert!(refs[0]["doi"].as_str().is_some() || refs[0]["review_slug"].as_str().is_some());
 
-    let recs = body_json(build_router(s.clone()).oneshot(post("/api/recommendations", high)).await.unwrap()).await;
+    let recs = body_json(call(&s, post("/api/recommendations", high)).await).await;
     for r in recs.as_array().unwrap() {
         assert!(!r["references"].as_array().unwrap().is_empty(),
             "recommendation {} cites at least one study", r["feature"]);
@@ -507,16 +502,15 @@ fn env_is_lever_only_in_relocate() {
                        "waist": 80, "pm25": 19.0, "ndvi": 0.35});
 
     // Recommendations never mention env (context, not a lever) — healthy lifestyle → none at all.
-    let recs = body_json(build_router(s.clone()).oneshot(post("/api/recommendations", dirty.clone())).await.unwrap()).await;
+    let recs = body_json(call(&s, post("/api/recommendations", dirty.clone())).await).await;
     assert!(recs.as_array().unwrap().iter().all(|r| r["feature"] != "env"), "env is never recommended");
 
     // why[] carries no env factor (env is a context term outside the attribution set).
-    let est = body_json(build_router(s.clone()).oneshot(post("/api/estimate", dirty.clone())).await.unwrap()).await;
+    let est = body_json(call(&s, post("/api/estimate", dirty.clone())).await).await;
     assert!(est["why"].as_array().unwrap().iter().all(|w| w["key"] != "env"), "env is not a why[] factor");
 
     // But relocation DOES act on it.
-    let rel = body_json(build_router(s.clone())
-        .oneshot(post("/api/relocate", json!({"base": dirty, "to": "Rural (national)"}))).await.unwrap()).await;
+    let rel = body_json(call(&s, post("/api/relocate", json!({"base": dirty, "to": "Rural (national)"}))).await).await;
     assert!(rel["delta_years"].as_f64().unwrap() > 0.0, "moving to cleaner air adds years (env as lever)");
     });
 }
@@ -531,10 +525,10 @@ fn audit_captures_before_after_and_citation() {
 
     // Create then update a question.
     let create = json!({"code": code, "section": "Test", "text": "Original text?", "input_type": "number", "citation": "ops: create"});
-    assert_eq!(build_router(s.clone()).oneshot(post_auth("/api/admin/questions", create, &admin)).await.unwrap().status(), StatusCode::OK);
-    assert_eq!(build_router(s.clone()).oneshot(post_auth_put(&format!("/api/admin/questions/{code}"), json!({"text": "Edited text?", "citation": "ops: edit"}), &admin)).await.unwrap().status(), StatusCode::OK);
+    assert_eq!(call(&s, post_auth("/api/admin/questions", create, &admin)).await.status(), StatusCode::OK);
+    assert_eq!(call(&s, post_auth_put(&format!("/api/admin/questions/{code}"), json!({"text": "Edited text?", "citation": "ops: edit"}), &admin)).await.status(), StatusCode::OK);
 
-    let audit = body_json(build_router(s.clone()).oneshot(get_auth("/api/admin/audit", &admin)).await.unwrap()).await;
+    let audit = body_json(call(&s, get_auth("/api/admin/audit", &admin)).await).await;
     let entries = audit.as_array().unwrap();
 
     // Create entry: before is null, after is the row, citation present.
@@ -562,22 +556,22 @@ fn admin_model_pin() {
     let user = register_token(&s).await;
 
     // Non-admin → 403; unknown semver → 404.
-    assert_eq!(build_router(s.clone()).oneshot(post_auth("/api/admin/model/pin", json!({"semver": "2.0.0", "citation": "c"}), &user)).await.unwrap().status(), StatusCode::FORBIDDEN);
-    assert_eq!(build_router(s.clone()).oneshot(post_auth("/api/admin/model/pin", json!({"semver": "9.9.9", "citation": "c"}), &admin)).await.unwrap().status(), StatusCode::NOT_FOUND);
+    assert_eq!(call(&s, post_auth("/api/admin/model/pin", json!({"semver": "2.0.0", "citation": "c"}), &user)).await.status(), StatusCode::FORBIDDEN);
+    assert_eq!(call(&s, post_auth("/api/admin/model/pin", json!({"semver": "9.9.9", "citation": "c"}), &admin)).await.status(), StatusCode::NOT_FOUND);
 
     // Insert a second (inactive) version, pin it, and confirm exactly one active — the new one.
     sqlx::query("INSERT INTO model_version (semver, artifact_uri, algorithm, is_active) VALUES ('2.0.0-test','test','cox_ph',false) ON CONFLICT (semver) DO NOTHING")
         .execute(&s.pool).await.unwrap();
-    let resp = build_router(s.clone()).oneshot(post_auth("/api/admin/model/pin", json!({"semver": "2.0.0-test", "citation": "ops: activate test model"}), &admin)).await.unwrap();
+    let resp = call(&s, post_auth("/api/admin/model/pin", json!({"semver": "2.0.0-test", "citation": "ops: activate test model"}), &admin)).await;
     assert_eq!(resp.status(), StatusCode::OK);
     let active: Vec<String> = sqlx::query_scalar("SELECT semver FROM model_version WHERE is_active").fetch_all(&s.pool).await.unwrap();
     assert_eq!(active, vec!["2.0.0-test".to_string()], "exactly one active, the newly pinned one");
 
-    let audit = body_json(build_router(s.clone()).oneshot(get_auth("/api/admin/audit", &admin)).await.unwrap()).await;
+    let audit = body_json(call(&s, get_auth("/api/admin/audit", &admin)).await).await;
     assert!(audit.as_array().unwrap().iter().any(|e| e["entity"] == "model_version" && e["action"] == "pin_model"));
 
     // Restore the real active model and remove the test row (shared DB).
-    build_router(s.clone()).oneshot(post_auth("/api/admin/model/pin", json!({"semver": "2.0.0", "citation": "ops: restore"}), &admin)).await.unwrap();
+    call(&s, post_auth("/api/admin/model/pin", json!({"semver": "2.0.0", "citation": "ops: restore"}), &admin)).await;
     sqlx::query("DELETE FROM model_version WHERE semver = '2.0.0-test'").execute(&s.pool).await.unwrap();
     });
 }
@@ -592,33 +586,33 @@ fn admin_feature_and_rule_mutations() {
 
     // Non-admin cannot edit a feature.
     assert_eq!(
-        build_router(s.clone()).oneshot(post_auth_put("/api/admin/features/income", json!({"name": "x", "citation": "c"}), &user)).await.unwrap().status(),
+        call(&s, post_auth_put("/api/admin/features/income", json!({"name": "x", "citation": "c"}), &user)).await.status(),
         StatusCode::FORBIDDEN);
 
     // Edit a feature's citation (harmless to other tests).
-    let resp = build_router(s.clone()).oneshot(post_auth_put("/api/admin/features/income", json!({"feature_citation": "SES gradient (reviewed)", "citation": "ops: refine citation"}), &admin)).await.unwrap();
+    let resp = call(&s, post_auth_put("/api/admin/features/income", json!({"feature_citation": "SES gradient (reviewed)", "citation": "ops: refine citation"}), &admin)).await;
     assert_eq!(resp.status(), StatusCode::OK);
 
     // Invalid role → 400 (CHECK violation mapped).
     assert_eq!(
-        build_router(s.clone()).oneshot(post_auth_put("/api/admin/features/income", json!({"role": "bogus", "citation": "c"}), &admin)).await.unwrap().status(),
+        call(&s, post_auth_put("/api/admin/features/income", json!({"role": "bogus", "citation": "c"}), &admin)).await.status(),
         StatusCode::BAD_REQUEST);
 
     // Create a rule (unique code, never-matching condition), then update it. Unknown feature_key → 400.
     let code = format!("Rtest_{}_{}", std::process::id(), COUNTER_CODE.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
     let create = json!({"code": code, "feature_key": "activity", "condition": {"field": "smoke", "op": "eq", "value": 99},
                         "message": "test rule", "priority": 1, "evidence_citation": "test", "citation": "ops: new rule"});
-    assert_eq!(build_router(s.clone()).oneshot(post_auth("/api/admin/rules", create, &admin)).await.unwrap().status(), StatusCode::OK);
+    assert_eq!(call(&s, post_auth("/api/admin/rules", create, &admin)).await.status(), StatusCode::OK);
 
     let bad_fk = json!({"code": format!("{code}_x"), "feature_key": "nope", "condition": {}, "message": "m", "evidence_citation": "e", "citation": "c"});
-    assert_eq!(build_router(s.clone()).oneshot(post_auth("/api/admin/rules", bad_fk, &admin)).await.unwrap().status(), StatusCode::BAD_REQUEST);
+    assert_eq!(call(&s, post_auth("/api/admin/rules", bad_fk, &admin)).await.status(), StatusCode::BAD_REQUEST);
 
-    let upd = build_router(s.clone()).oneshot(post_auth_put(&format!("/api/admin/rules/{code}"), json!({"priority": 5, "citation": "ops: bump priority"}), &admin)).await.unwrap();
+    let upd = call(&s, post_auth_put(&format!("/api/admin/rules/{code}"), json!({"priority": 5, "citation": "ops: bump priority"}), &admin)).await;
     assert_eq!(upd.status(), StatusCode::OK);
     assert_eq!(body_json(upd).await["priority"].as_i64().unwrap(), 5);
 
     // Audit recorded feature + rule mutations.
-    let audit = body_json(build_router(s.clone()).oneshot(get_auth("/api/admin/audit", &admin)).await.unwrap()).await;
+    let audit = body_json(call(&s, get_auth("/api/admin/audit", &admin)).await).await;
     let e = audit.as_array().unwrap();
     assert!(e.iter().any(|x| x["entity"] == "feature" && x["action"] == "update"));
     assert!(e.iter().any(|x| x["entity"] == "recommendation_rule" && x["action"] == "create"));
@@ -634,11 +628,11 @@ fn account_export() {
     RT.block_on(async {
     let s = state().await;
     let token = register_token(&s).await;
-    build_router(s.clone()).oneshot(post_auth("/api/estimate", valid_profile(), &token)).await.unwrap();
-    build_router(s.clone()).oneshot(post_auth("/api/answers", json!({"answers": [{"question_code": "Q5_smoking", "value": "No, never"}]}), &token)).await.unwrap();
+    call(&s, post_auth("/api/estimate", valid_profile(), &token)).await;
+    call(&s, post_auth("/api/answers", json!({"answers": [{"question_code": "Q5_smoking", "value": "No, never"}]}), &token)).await;
 
-    assert_eq!(build_router(s.clone()).oneshot(get("/api/account/export")).await.unwrap().status(), StatusCode::UNAUTHORIZED);
-    let exp = body_json(build_router(s.clone()).oneshot(get_auth("/api/account/export", &token)).await.unwrap()).await;
+    assert_eq!(call(&s, get("/api/account/export")).await.status(), StatusCode::UNAUTHORIZED);
+    let exp = body_json(call(&s, get_auth("/api/account/export", &token)).await).await;
     assert!(exp["account"]["password_hash"].is_null(), "export never includes the password hash");
     assert!(exp["account"]["id"].as_str().is_some());
     assert!(exp["answers"].as_array().unwrap().len() >= 1);
@@ -653,22 +647,22 @@ fn account_erasure_cascades() {
     let s = state().await;
     let a = register_token(&s).await;
     let b = register_token(&s).await;
-    build_router(s.clone()).oneshot(post_auth("/api/estimate", valid_profile(), &a)).await.unwrap();
-    build_router(s.clone()).oneshot(post_auth("/api/estimate", valid_profile(), &b)).await.unwrap();
-    let a_id = body_json(build_router(s.clone()).oneshot(get_auth("/api/account/export", &a)).await.unwrap()).await["account"]["id"].as_str().unwrap().to_string();
+    call(&s, post_auth("/api/estimate", valid_profile(), &a)).await;
+    call(&s, post_auth("/api/estimate", valid_profile(), &b)).await;
+    let a_id = body_json(call(&s, get_auth("/api/account/export", &a)).await).await["account"]["id"].as_str().unwrap().to_string();
 
     // Delete A.
-    assert_eq!(build_router(s.clone()).oneshot(delete_auth("/api/account", &a)).await.unwrap().status(), StatusCode::OK);
+    assert_eq!(call(&s, delete_auth("/api/account", &a)).await.status(), StatusCode::OK);
 
     // A's account + calculations are gone (cascade); A's export now 404.
     let acct: i64 = sqlx::query_scalar("SELECT count(*) FROM account WHERE id = $1::uuid").bind(&a_id).fetch_one(&s.pool).await.unwrap();
     assert_eq!(acct, 0, "account deleted");
     let calcs: i64 = sqlx::query_scalar("SELECT count(*) FROM calculation WHERE account_id = $1::uuid").bind(&a_id).fetch_one(&s.pool).await.unwrap();
     assert_eq!(calcs, 0, "calculations cascade-deleted");
-    assert_eq!(build_router(s.clone()).oneshot(get_auth("/api/account/export", &a)).await.unwrap().status(), StatusCode::NOT_FOUND);
+    assert_eq!(call(&s, get_auth("/api/account/export", &a)).await.status(), StatusCode::NOT_FOUND);
 
     // B is untouched.
-    let b_calcs = body_json(build_router(s.clone()).oneshot(get_auth("/api/calculations", &b)).await.unwrap()).await;
+    let b_calcs = body_json(call(&s, get_auth("/api/calculations", &b)).await).await;
     assert!(b_calcs.as_array().unwrap().len() >= 1, "other account unaffected");
     });
 }
@@ -681,21 +675,21 @@ fn rectification() {
     let token = register_token(&s).await;
 
     // Correct an answer (upsert) — already covered elsewhere, asserted here as part of the surface.
-    build_router(s.clone()).oneshot(post_auth("/api/answers", json!({"answers": [{"question_code": "Q5_smoking", "value": "Yes, currently"}]}), &token)).await.unwrap();
-    build_router(s.clone()).oneshot(post_auth("/api/answers", json!({"answers": [{"question_code": "Q5_smoking", "value": "No, never"}]}), &token)).await.unwrap();
-    let p = body_json(build_router(s.clone()).oneshot(get_auth("/api/profile", &token)).await.unwrap()).await;
+    call(&s, post_auth("/api/answers", json!({"answers": [{"question_code": "Q5_smoking", "value": "Yes, currently"}]}), &token)).await;
+    call(&s, post_auth("/api/answers", json!({"answers": [{"question_code": "Q5_smoking", "value": "No, never"}]}), &token)).await;
+    let p = body_json(call(&s, get_auth("/api/profile", &token)).await).await;
     let q5 = p["answers"].as_array().unwrap().iter().find(|a| a["question_code"] == "Q5_smoking").unwrap();
     assert_eq!(q5["value"], "No, never", "answer corrected");
 
     // Correct the account locale.
-    assert_eq!(build_router(s.clone()).oneshot(patch_auth("/api/account", json!({"locale": ""}), &token)).await.unwrap().status(), StatusCode::BAD_REQUEST);
-    let resp = build_router(s.clone()).oneshot(patch_auth("/api/account", json!({"locale": "en"}), &token)).await.unwrap();
+    assert_eq!(call(&s, patch_auth("/api/account", json!({"locale": ""}), &token)).await.status(), StatusCode::BAD_REQUEST);
+    let resp = call(&s, patch_auth("/api/account", json!({"locale": "en"}), &token)).await;
     assert_eq!(resp.status(), StatusCode::OK);
-    let exp = body_json(build_router(s.clone()).oneshot(get_auth("/api/account/export", &token)).await.unwrap()).await;
+    let exp = body_json(call(&s, get_auth("/api/account/export", &token)).await).await;
     assert_eq!(exp["account"]["locale"], "en", "locale corrected");
 
     // No auth → 401.
-    assert_eq!(build_router(s.clone()).oneshot(patch_auth("/api/account", json!({"locale": "ro"}), "")).await.unwrap().status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(call(&s, patch_auth("/api/account", json!({"locale": "ro"}), "")).await.status(), StatusCode::UNAUTHORIZED);
     });
 }
 
@@ -704,7 +698,7 @@ fn rectification() {
 fn aggregates_expose_no_individual_data() {
     RT.block_on(async {
     let s = state().await;
-    let agg = body_json(build_router(s.clone()).oneshot(get("/api/aggregates")).await.unwrap()).await;
+    let agg = body_json(call(&s, get("/api/aggregates")).await).await;
     // No account ids or raw input payloads anywhere in the serialized response.
     let text = agg.to_string();
     assert!(!text.contains("account_id"), "no account ids in aggregates");
@@ -745,7 +739,7 @@ fn aggregates_k_gating() {
     seed("ZZ", 22).await;
     seed("YY", 3).await;
 
-    let agg = body_json(build_router(s.clone()).oneshot(get("/api/aggregates")).await.unwrap()).await;
+    let agg = body_json(call(&s, get("/api/aggregates")).await).await;
     assert!(agg["n"].as_i64().unwrap() >= 22, "n counts distinct accounts");
     assert!(!agg["estimate_years"].is_null(), "distribution present when cohort >= k");
     let countries: Vec<&str> = agg["by_country"].as_array().unwrap().iter()
@@ -763,7 +757,7 @@ fn aggregates_k_gating() {
 fn openapi_spec_is_generator_ready() {
     RT.block_on(async {
     let s = state().await;
-    let doc = body_json(build_router(s.clone()).oneshot(get("/api/openapi.json")).await.unwrap()).await;
+    let doc = body_json(call(&s, get("/api/openapi.json")).await).await;
     assert_eq!(doc["openapi"], "3.0.3");
     assert!(doc["info"]["title"].as_str().is_some() && doc["info"]["version"].as_str().is_some());
     assert!(doc["servers"].as_array().map(|a| !a.is_empty()).unwrap_or(false), "servers present");
@@ -793,7 +787,7 @@ fn openapi_spec_is_generator_ready() {
 fn openapi_lists_all_routes() {
     RT.block_on(async {
     let s = state().await;
-    let doc = body_json(build_router(s.clone()).oneshot(get("/api/openapi.json")).await.unwrap()).await;
+    let doc = body_json(call(&s, get("/api/openapi.json")).await).await;
     assert_eq!(doc["openapi"], "3.0.3");
     assert!(doc["components"]["securitySchemes"]["bearerAuth"].is_object(), "bearer auth scheme declared");
     let paths = doc["paths"].as_object().expect("paths object");
@@ -831,13 +825,13 @@ fn spa_served_with_fallback() {
     });
 
     // A deep link (no such file) falls back to index.html.
-    let resp = build_router(custom.clone()).oneshot(get("/dashboard/deep/link")).await.unwrap();
+    let resp = call(&custom, get("/dashboard/deep/link")).await;
     assert_eq!(resp.status(), StatusCode::OK);
     let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
     assert!(String::from_utf8_lossy(&bytes).contains("Clock SPA"), "deep link serves the SPA index");
 
     // API routes still take precedence over the SPA fallback.
-    let health = build_router(custom.clone()).oneshot(get("/health")).await.unwrap();
+    let health = call(&custom, get("/health")).await;
     assert_eq!(health.status(), StatusCode::OK);
     assert_eq!(body_json(health).await["status"], "ok");
 
@@ -851,7 +845,7 @@ fn errors_are_structured_json() {
     RT.block_on(async {
     let s = state().await;
     // 401 (no auth).
-    let resp = build_router(s.clone()).oneshot(get("/api/calculations")).await.unwrap();
+    let resp = call(&s, get("/api/calculations")).await;
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     let body = body_json(resp).await;
     assert!(body["error"].as_str().is_some(), "401 body is JSON with an error field");
@@ -859,12 +853,12 @@ fn errors_are_structured_json() {
     // 400 (validation).
     let mut bad = valid_profile();
     bad["age"] = json!(5);
-    let resp = build_router(s.clone()).oneshot(post("/api/estimate", bad)).await.unwrap();
+    let resp = call(&s, post("/api/estimate", bad)).await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     assert!(body_json(resp).await["error"].as_str().is_some(), "400 body is JSON");
 
     // 404 (unknown relocate target).
-    let resp = build_router(s.clone()).oneshot(post("/api/relocate", json!({"base": valid_profile(), "to": "Nowhere"}))).await.unwrap();
+    let resp = call(&s, post("/api/relocate", json!({"base": valid_profile(), "to": "Nowhere"}))).await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     assert!(body_json(resp).await["error"].as_str().is_some(), "404 body is JSON");
     });
@@ -875,7 +869,7 @@ fn errors_are_structured_json() {
 fn health_readiness() {
     RT.block_on(async {
     let s = state().await;
-    let resp = build_router(s.clone()).oneshot(get("/health")).await.unwrap();
+    let resp = call(&s, get("/health")).await;
     assert_eq!(resp.status(), StatusCode::OK);
     let body = body_json(resp).await;
     assert_eq!(body["status"], "ok");
@@ -889,13 +883,13 @@ fn health_readiness() {
 fn admin_gate() {
     RT.block_on(async {
     let s = state().await;
-    assert_eq!(build_router(s.clone()).oneshot(get("/api/admin/audit")).await.unwrap().status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(call(&s, get("/api/admin/audit")).await.status(), StatusCode::UNAUTHORIZED);
 
     let user = register_token(&s).await;
-    assert_eq!(build_router(s.clone()).oneshot(get_auth("/api/admin/audit", &user)).await.unwrap().status(), StatusCode::FORBIDDEN);
+    assert_eq!(call(&s, get_auth("/api/admin/audit", &user)).await.status(), StatusCode::FORBIDDEN);
 
     let admin = register_admin(&s).await;
-    let resp = build_router(s.clone()).oneshot(get_auth("/api/admin/audit", &admin)).await.unwrap();
+    let resp = call(&s, get_auth("/api/admin/audit", &admin)).await;
     assert_eq!(resp.status(), StatusCode::OK);
     assert!(body_json(resp).await.is_array(), "audit log is a list");
     });
@@ -907,29 +901,29 @@ fn admin_question_mutations() {
     RT.block_on(async {
     let s = state().await;
     let admin = register_admin(&s).await;
-    let put = |code: &str, body: Value| build_router(s.clone()).oneshot(post_auth_put(&format!("/api/admin/questions/{code}"), body, &admin));
+    let put = |code: &str, body: Value| post_auth_put(&format!("/api/admin/questions/{code}"), body, &admin);
 
     // Citation is required.
-    assert_eq!(put("Q11_sleep", json!({"text": "x", "citation": ""})).await.unwrap().status(), StatusCode::BAD_REQUEST);
+    assert_eq!(call(&s, put("Q11_sleep", json!({"text": "x", "citation": ""}))).await.status(), StatusCode::BAD_REQUEST);
 
     // Read current version, update, confirm version bumped + change applied.
-    let qs = body_json(build_router(s.clone()).oneshot(get("/api/questions")).await.unwrap()).await;
+    let qs = body_json(call(&s, get("/api/questions")).await).await;
     let v0 = qs.as_array().unwrap().iter().find(|q| q["code"] == "Q11_sleep").unwrap()["version"].as_i64().unwrap();
-    let resp = put("Q11_sleep", json!({"text": "On a typical night, how many hours do you sleep? (edited)", "citation": "ops: wording tweak"})).await.unwrap();
+    let resp = call(&s, put("Q11_sleep", json!({"text": "On a typical night, how many hours do you sleep? (edited)", "citation": "ops: wording tweak"}))).await;
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(body_json(resp).await["version"].as_i64().unwrap(), v0 + 1, "version bumped");
 
     // Unknown question → 404.
-    assert_eq!(put("Q999_nope", json!({"text": "x", "citation": "c"})).await.unwrap().status(), StatusCode::NOT_FOUND);
+    assert_eq!(call(&s, put("Q999_nope", json!({"text": "x", "citation": "c"}))).await.status(), StatusCode::NOT_FOUND);
 
     // Create a new question (unique code across runs), duplicate → 409.
     let code = format!("Qtest_{}_{}", std::process::id(), COUNTER_CODE.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
     let create = json!({"code": code, "section": "Test", "text": "Test question?", "input_type": "number", "citation": "ops: new item"});
-    assert_eq!(build_router(s.clone()).oneshot(post_auth("/api/admin/questions", create.clone(), &admin)).await.unwrap().status(), StatusCode::OK);
-    assert_eq!(build_router(s.clone()).oneshot(post_auth("/api/admin/questions", create, &admin)).await.unwrap().status(), StatusCode::CONFLICT);
+    assert_eq!(call(&s, post_auth("/api/admin/questions", create.clone(), &admin)).await.status(), StatusCode::OK);
+    assert_eq!(call(&s, post_auth("/api/admin/questions", create, &admin)).await.status(), StatusCode::CONFLICT);
 
     // The audit log records the mutations with citations.
-    let audit = body_json(build_router(s.clone()).oneshot(get_auth("/api/admin/audit", &admin)).await.unwrap()).await;
+    let audit = body_json(call(&s, get_auth("/api/admin/audit", &admin)).await).await;
     let entries = audit.as_array().unwrap();
     assert!(entries.iter().any(|e| e["entity"] == "question" && e["action"] == "update"
         && e["citation"].as_str().map(|c| !c.is_empty()).unwrap_or(false)), "update audited with citation");
@@ -959,8 +953,7 @@ fn relocate_compares_locations() {
     let s = state().await;
     let base = json!({"country": "RO", "age": 45, "sex": "M", "smoke": 0, "pa_min": 600, "sleep": 7, "waist": 90});
 
-    let resp = build_router(s.clone())
-        .oneshot(post("/api/relocate", json!({"base": base, "from": "Bucharest", "to": "Brașov"}))).await.unwrap();
+    let resp = call(&s, post("/api/relocate", json!({"base": base, "from": "Bucharest", "to": "Brașov"}))).await;
     assert_eq!(resp.status(), StatusCode::OK);
     let r = body_json(resp).await;
     assert!(r["delta_years"].as_f64().unwrap() > 0.0, "cleaner+greener location adds years");
@@ -968,13 +961,12 @@ fn relocate_compares_locations() {
     assert!(r["breakdown"]["greenspace_delta_years"].as_f64().is_some());
 
     // Reverse move loses years (symmetric).
-    let rev = body_json(build_router(s.clone())
-        .oneshot(post("/api/relocate", json!({"base": base, "from": "Brașov", "to": "Bucharest"}))).await.unwrap()).await;
+    let rev = body_json(call(&s, post("/api/relocate", json!({"base": base, "from": "Brașov", "to": "Bucharest"}))).await).await;
     assert!(rev["delta_years"].as_f64().unwrap() < 0.0, "dirtier location costs years");
 
     // Unknown target → 404.
     assert_eq!(
-        build_router(s.clone()).oneshot(post("/api/relocate", json!({"base": base, "to": "Atlantis"}))).await.unwrap().status(),
+        call(&s, post("/api/relocate", json!({"base": base, "to": "Atlantis"}))).await.status(),
         StatusCode::NOT_FOUND);
     });
 }
@@ -984,24 +976,24 @@ fn relocate_compares_locations() {
 fn locations_and_home_location() {
     RT.block_on(async {
     let s = state().await;
-    let locs = body_json(build_router(s.clone()).oneshot(get("/api/locations")).await.unwrap()).await;
+    let locs = body_json(call(&s, get("/api/locations")).await).await;
     assert!(locs.as_array().unwrap().len() >= 5, "locations seeded and public");
 
     let token = register_token(&s).await;
     // Unknown location → 404.
     assert_eq!(
-        build_router(s.clone()).oneshot(post_auth("/api/profile/location", json!({"name": "Atlantis"}), &token)).await.unwrap().status(),
+        call(&s, post_auth("/api/profile/location", json!({"name": "Atlantis"}), &token)).await.status(),
         StatusCode::NOT_FOUND);
     // Set a known location.
-    let resp = build_router(s.clone()).oneshot(post_auth("/api/profile/location", json!({"name": "Cluj-Napoca"}), &token)).await.unwrap();
+    let resp = call(&s, post_auth("/api/profile/location", json!({"name": "Cluj-Napoca"}), &token)).await;
     assert_eq!(resp.status(), StatusCode::OK);
     assert!(body_json(resp).await["home_location_id"].as_str().is_some());
     // Profile reflects it.
-    let p = body_json(build_router(s.clone()).oneshot(get_auth("/api/profile", &token)).await.unwrap()).await;
+    let p = body_json(call(&s, get_auth("/api/profile", &token)).await).await;
     assert!(p["home_location_id"].as_str().is_some(), "home location saved on the profile");
     // No auth → 401.
     assert_eq!(
-        build_router(s.clone()).oneshot(post("/api/profile/location", json!({"name": "Cluj-Napoca"}))).await.unwrap().status(),
+        call(&s, post("/api/profile/location", json!({"name": "Cluj-Napoca"}))).await.status(),
         StatusCode::UNAUTHORIZED);
     });
 }
@@ -1011,7 +1003,7 @@ fn locations_and_home_location() {
 fn references_endpoint() {
     RT.block_on(async {
     let s = state().await;
-    let all = body_json(build_router(s.clone()).oneshot(get("/api/references")).await.unwrap()).await;
+    let all = body_json(call(&s, get("/api/references")).await).await;
     let arr = all.as_array().unwrap();
     assert_eq!(arr.len(), 8, "8 studies seeded");
     // Method papers carry a real DOI; every study has a code + title.
@@ -1021,14 +1013,14 @@ fn references_endpoint() {
         assert!(st["code"].as_str().is_some() && st["title"].as_str().is_some());
     }
 
-    let act = body_json(build_router(s.clone()).oneshot(get("/api/references?feature=activity")).await.unwrap()).await;
+    let act = body_json(call(&s, get("/api/references?feature=activity")).await).await;
     let codes: Vec<&str> = act.as_array().unwrap().iter().map(|s| s["code"].as_str().unwrap()).collect();
     assert!(codes.contains(&"instruments-scoring-formulas") && codes.contains(&"evidence-grades-and-alcohol"));
 
-    let rule = body_json(build_router(s.clone()).oneshot(get("/api/references?rule=quit_smoking")).await.unwrap()).await;
+    let rule = body_json(call(&s, get("/api/references?rule=quit_smoking")).await).await;
     assert_eq!(rule.as_array().unwrap().len(), 1);
 
-    let none = body_json(build_router(s.clone()).oneshot(get("/api/references?feature=nope")).await.unwrap()).await;
+    let none = body_json(call(&s, get("/api/references?feature=nope")).await).await;
     assert_eq!(none.as_array().unwrap().len(), 0, "unknown feature → empty");
     });
 }
@@ -1040,7 +1032,7 @@ fn unknown_question_code_is_bad_request() {
     let s = state().await;
     let token = register_token(&s).await;
     let req = json!({"answers": [{"question_code": "Q999_nonsense", "value": 1}]});
-    let resp = build_router(s.clone()).oneshot(post_auth("/api/answers", req, &token)).await.unwrap();
+    let resp = call(&s, post_auth("/api/answers", req, &token)).await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     });
 }
@@ -1054,19 +1046,17 @@ fn two_user_isolation() {
     let token_b = register_token(&s).await;
 
     // A creates a calculation and an answer.
-    build_router(s.clone()).oneshot(post_auth("/api/estimate", valid_profile(), &token_a)).await.unwrap();
-    build_router(s.clone())
-        .oneshot(post_auth("/api/answers", json!({"answers": [{"question_code": "Q11_sleep", "value": "7-8"}]}), &token_a))
-        .await.unwrap();
+    call(&s, post_auth("/api/estimate", valid_profile(), &token_a)).await;
+    call(&s, post_auth("/api/answers", json!({"answers": [{"question_code": "Q11_sleep", "value": "7-8"}]}), &token_a)).await;
 
     // B (fresh account) sees none of it.
-    let b_hist = body_json(build_router(s.clone()).oneshot(get_auth("/api/calculations", &token_b)).await.unwrap()).await;
+    let b_hist = body_json(call(&s, get_auth("/api/calculations", &token_b)).await).await;
     assert_eq!(b_hist.as_array().unwrap().len(), 0, "B's history is empty");
-    let b_answers = body_json(build_router(s.clone()).oneshot(get_auth("/api/answers", &token_b)).await.unwrap()).await;
+    let b_answers = body_json(call(&s, get_auth("/api/answers", &token_b)).await).await;
     assert_eq!(b_answers.as_array().unwrap().len(), 0, "B's answers are empty");
 
     // A still sees its own.
-    let a_hist = body_json(build_router(s.clone()).oneshot(get_auth("/api/calculations", &token_a)).await.unwrap()).await;
+    let a_hist = body_json(call(&s, get_auth("/api/calculations", &token_a)).await).await;
     assert!(a_hist.as_array().unwrap().len() >= 1, "A sees its own history");
     });
 }
@@ -1078,7 +1068,7 @@ fn bad_input_rejected() {
     let s = state().await;
     let mut bad = valid_profile();
     bad["age"] = json!(5); // below the 18 floor
-    let resp = build_router(s.clone()).oneshot(post("/api/estimate", bad)).await.unwrap();
+    let resp = call(&s, post("/api/estimate", bad)).await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     });
 }
