@@ -173,7 +173,7 @@ fn seeds_are_reconciled() {
     // Recommendation rules (API-02): all seeded, evidence-cited, referencing real features.
     let rules: i64 = sqlx::query_scalar("SELECT count(*) FROM recommendation_rule WHERE active AND code NOT LIKE 'Rtest%'")
         .fetch_one(&s.pool).await.unwrap();
-    assert_eq!(rules, 7, "7 recommendation rules seeded");
+    assert_eq!(rules, 11, "11 recommendation rules seeded (7 + the 4 literature levers, LEV-03)");
     let uncited: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM recommendation_rule WHERE evidence_citation IS NULL OR evidence_citation = ''",
     ).fetch_one(&s.pool).await.unwrap();
@@ -1208,4 +1208,53 @@ fn literature_gate_refuses_each_malformed_variant() {
 
     let err = load_with(&|c| { c["literature"]["diet"]["reference"]["kind"] = "level".into(); }, "bad-ref-kind");
     assert!(err.contains("reference kind"), "got: {err}");
+}
+
+
+/// LEV-03: the literature levers appear in why[] at their real grade, drive What-If, and fire
+/// evidence-cited recommendations with openable references.
+#[test]
+fn literature_levers_surface_everywhere() {
+    RT.block_on(async {
+    let s = state().await;
+    let risky = json!({"country": "RO", "age": 55, "sex": "M", "smoke": 0, "pa_min": 600, "sleep": 7,
+                       "waist": 95, "alcohol": "heavy", "diet_score": 0, "sitting_hours": 12,
+                       "stress_score": 14});
+
+    // why[]: alcohol + diet present, correctly signed, with citations and honest grades.
+    let est = body_json(call(&s, post("/api/estimate", risky.clone())).await).await;
+    let why = est["why"].as_array().unwrap();
+    let alcohol = why.iter().find(|w| w["key"] == "alcohol").expect("alcohol in why[]");
+    assert!(alcohol["delta_years"].as_f64().unwrap() < 0.0, "heavy drinking costs years");
+    assert!(!alcohol["citation"].as_str().unwrap().is_empty());
+    let diet = why.iter().find(|w| w["key"] == "diet").expect("diet in why[]");
+    assert!(diet["delta_years"].as_f64().unwrap() < 0.0, "a poor diet costs years");
+    let stress = why.iter().find(|w| w["key"] == "stress").expect("stress in why[]");
+    assert_eq!(stress["evidence"], "weak", "stress must show its honest (weak) grade");
+
+    // What-If: pricing the diet improvement adds years; cutting alcohol adds years.
+    let wi = body_json(call(&s, post("/api/whatif",
+        json!({"base": risky, "changes": {"diet_score": 5, "alcohol": "none"}}))).await).await;
+    assert!(wi["delta_years"].as_f64().unwrap() > 1.0,
+            "better diet + no alcohol must add years, got {}", wi["delta_years"]);
+
+    // Recommendations: the new rules fire, evidence-cited, with >= 1 openable reference each.
+    let recs = body_json(call(&s, post("/api/recommendations", risky)).await).await;
+    let recs = recs.as_array().unwrap();
+    for feature in ["alcohol", "diet", "sedentary", "stress"] {
+        let r = recs.iter().find(|r| r["feature"] == feature)
+            .unwrap_or_else(|| panic!("{feature} recommendation must fire"));
+        assert!(!r["references"].as_array().unwrap().is_empty(), "{feature} has references");
+        assert!(!r["evidence_citation"].as_str().unwrap().is_empty());
+    }
+
+    // And an unanswered profile fires none of the four (a rule never acts on a guess).
+    let plain = json!({"country": "RO", "age": 55, "sex": "M", "smoke": 0, "pa_min": 600,
+                       "sleep": 7, "waist": 95});
+    let recs = body_json(call(&s, post("/api/recommendations", plain)).await).await;
+    for r in recs.as_array().unwrap() {
+        assert!(!["alcohol", "diet", "sedentary", "stress"].contains(&r["feature"].as_str().unwrap()),
+                "unanswered levers must not be recommended");
+    }
+    });
 }

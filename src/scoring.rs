@@ -209,11 +209,12 @@ pub fn remaining_le(qx: &HashMap<String, f64>, start_age: i64, rr: f64) -> f64 {
     le
 }
 
-/// The literature levers' log-hazard contribution. Every term is a DEVIATION from its centring
-/// reference (bundle `literature[..].reference`): an unanswered lever or an average answer adds
-/// exactly 0, so the average person still reads RR 1.0 against the national life table (EXP-13).
-pub fn literature_lp(p: &Profile, coefs: &Coefficients) -> f64 {
-    let mut lp = 0.0;
+/// Per-lever literature contributions, as `(key, d_lp)` pairs. Every term is a DEVIATION from its
+/// centring reference (bundle `literature[..].reference`): an unanswered lever or an average answer
+/// contributes nothing, so the average person still reads RR 1.0 against the national life table
+/// (EXP-13). One choke point — the estimate, Why? and What-If all read these same terms (LEV-03).
+pub fn literature_terms(p: &Profile, coefs: &Coefficients) -> Vec<(&'static str, f64)> {
+    let mut terms = Vec::new();
     let cont = [
         ("diet", p.diet_score),
         ("sedentary", p.sitting_hours),
@@ -223,7 +224,7 @@ pub fn literature_lp(p: &Profile, coefs: &Coefficients) -> f64 {
         if let (Some(f), Some(raw)) = (coefs.literature.get(key), answer) {
             if let Some(beta) = f.beta {
                 // reference kind "mean" => z(reference) = 0, so the deviation is just beta * z(user).
-                lp += beta * z(raw, coefs, key);
+                terms.push((key, beta * z(raw, coefs, key)));
             }
         }
     }
@@ -232,11 +233,19 @@ pub fn literature_lp(p: &Profile, coefs: &Coefficients) -> f64 {
             // The load gate guarantees: all ALCOHOL_LEVELS present, reference declared and present —
             // so these lookups cannot silently misprice a level (PR#1 F3).
             let reference = f.reference.as_ref().and_then(|r| r.level.as_deref()).unwrap_or("none");
-            lp += levels.get(level).copied().unwrap_or(0.0)
-                - levels.get(reference).copied().unwrap_or(0.0);
+            terms.push((
+                "alcohol",
+                levels.get(level).copied().unwrap_or(0.0)
+                    - levels.get(reference).copied().unwrap_or(0.0),
+            ));
         }
     }
-    lp
+    terms
+}
+
+/// The literature levers' total log-hazard contribution (sum of `literature_terms`).
+pub fn literature_lp(p: &Profile, coefs: &Coefficients) -> f64 {
+    literature_terms(p, coefs).iter().map(|(_, d)| d).sum()
 }
 
 /// Precise relative risk for a profile, plus the resolved country baseline.
@@ -344,6 +353,35 @@ pub fn attributions(bundle: &Bundle, p: &Profile) -> Result<Vec<Attribution>, St
             citation: ev.map(|e| e.citation.clone()).unwrap_or_default(),
         });
     }
+    // Literature levers (LEV-03): same removal semantics — each answered, non-reference lever shows
+    // the years its deviation is worth, at its real (often weaker) evidence grade.
+    const LIT_LABELS: &[(&str, &str)] = &[
+        ("diet", "Diet quality"),
+        ("alcohol", "Alcohol"),
+        ("sedentary", "Sitting time"),
+        ("stress", "Perceived stress"),
+    ];
+    for (key, d_lp) in literature_terms(p, &bundle.coefficients) {
+        if d_lp == 0.0 {
+            continue; // answered exactly at the reference — nothing to explain
+        }
+        let rr_without = base_rr * (-d_lp).exp();
+        let years_without = remaining_le(qx, age, rr_without);
+        let delta = years_actual - years_without;
+        if delta.abs() < 0.05 {
+            continue;
+        }
+        let label = LIT_LABELS.iter().find(|(k, _)| *k == key).map(|(_, l)| *l).unwrap_or(key);
+        let ev = bundle.evidence.get(key);
+        out.push(Attribution {
+            key: key.to_string(),
+            factor: label.to_string(),
+            delta_years: round1(delta),
+            role: ev.map(|e| e.role.clone()).unwrap_or_else(|| "lever".into()),
+            evidence: ev.map(|e| e.grade.clone()).unwrap_or_default(),
+            citation: ev.map(|e| e.citation.clone()).unwrap_or_default(),
+        });
+    }
     out.sort_by(|a, b| {
         b.delta_years
             .abs()
@@ -360,6 +398,16 @@ pub struct WhatIfChanges {
     pub pa_min: Option<f64>,
     pub sleep: Option<f64>,
     pub waist: Option<f64>,
+    // Literature levers (LEV-03): their coefficients ARE total effects (standalone additive terms),
+    // so the overlay prices them with the same numbers the estimate uses.
+    #[serde(default)]
+    pub diet_score: Option<f64>,
+    #[serde(default)]
+    pub alcohol: Option<String>,
+    #[serde(default)]
+    pub sitting_hours: Option<f64>,
+    #[serde(default)]
+    pub stress_score: Option<f64>,
 }
 
 #[derive(Serialize)]
@@ -397,6 +445,10 @@ pub fn whatif(bundle: &Bundle, base: &Profile, changes: &WhatIfChanges) -> Resul
     if let Some(v) = changes.pa_min { modified.pa_min = v; }
     if let Some(v) = changes.sleep { modified.sleep = v; }
     if let Some(v) = changes.waist { modified.waist = v; }
+    if let Some(v) = changes.diet_score { modified.diet_score = Some(v); }
+    if let Some(v) = changes.alcohol.clone() { modified.alcohol = Some(v); }
+    if let Some(v) = changes.sitting_hours { modified.sitting_hours = Some(v); }
+    if let Some(v) = changes.stress_score { modified.stress_score = Some(v); }
     modified.validate().map_err(|e| format!("change produces invalid profile: {e}"))?;
 
     // Delta uses the total-effect attribution MAIN effects only. The age-interaction terms
@@ -409,7 +461,11 @@ pub fn whatif(bundle: &Bundle, base: &Profile, changes: &WhatIfChanges) -> Resul
     let d_lp: f64 = attr.iter()
         .filter(|(k, _)| !k.ends_with("_x_young"))
         .map(|(k, c)| c * (d1.get(k).copied().unwrap_or(0.0) - d0.get(k).copied().unwrap_or(0.0)))
-        .sum();
+        .sum::<f64>()
+        // Literature levers are standalone total effects — their scenario delta is the same
+        // deviation arithmetic the estimate uses.
+        + literature_lp(&modified, &bundle.coefficients)
+        - literature_lp(base, &bundle.coefficients);
     let scenario_rr = base_rr * d_lp.exp();
     let scenario_years = remaining_le(qx, age, scenario_rr);
 
@@ -436,6 +492,13 @@ fn profile_field(p: &Profile, field: &str) -> Option<f64> {
         "cvd_hx" => b(p.cvd_hx),
         "cancer_hx" => b(p.cancer_hx),
         "higher_educ" => b(p.higher_educ),
+        // Literature levers (LEV-03): unanswered -> None, so a rule can never fire on a question
+        // the user did not answer (principle 9 — a guess is not a fact).
+        "diet_score" => p.diet_score?,
+        "sitting_hours" => p.sitting_hours?,
+        "stress_score" => p.stress_score?,
+        // Ordinal view for rule thresholds: none 0 / light 1 / moderate 2 / heavy 3.
+        "alcohol" => ALCOHOL_LEVELS.iter().position(|l| Some(*l) == p.alcohol.as_deref())? as f64,
         _ => return None,
     })
 }
@@ -538,6 +601,28 @@ mod tests {
         // must price identically until the ordinal refit (PR#1 F1 pin).
         assert_eq!(years(&|p| p.mobility = Some(1)), years(&|p| p.mobility = Some(2)),
                 "binary encoding: mobility 1 and 2 score the same");
+    }
+
+    #[test]
+    fn whatif_prices_literature_levers() {
+        let b = bundle();
+        let mut base = plain_profile();
+        base.alcohol = Some("heavy".into());
+        base.diet_score = Some(0.0);
+        let changes = WhatIfChanges {
+            smoke: None, pa_min: None, sleep: None, waist: None,
+            diet_score: Some(5.0), alcohol: Some("none".into()),
+            sitting_hours: None, stress_score: None,
+        };
+        let wi = whatif(&b, &base, &changes).unwrap();
+        assert!(wi.delta_years > 1.0, "diet 0->5 + heavy->none must add years, got {}", wi.delta_years);
+        // Consistency: the overlay must agree with two direct estimates, because the literature
+        // coefficients are their own total effects.
+        let mut better = base.clone();
+        better.diet_score = Some(5.0);
+        better.alcohol = Some("none".into());
+        let direct = estimate(&b, &better).unwrap().estimate_years - estimate(&b, &base).unwrap().estimate_years;
+        assert!((wi.delta_years - direct).abs() <= 0.2, "overlay {} vs direct {}", wi.delta_years, direct);
     }
 
     #[test]
