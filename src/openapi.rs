@@ -53,6 +53,7 @@ pub fn openapi_doc() -> Value {
             "/api/auth/login": { "post": op("Verify credentials, return a bearer token", false, "auth") },
 
             "/api/questions": { "get": op("Interview definition (24 questions)", false, "interview") },
+            "/api/ontology": { "get": op("Model ontology: roles, causal graph, verified article links", false, "evidence") },
             "/api/references": { "get": op("Evidence studies; ?feature= or ?rule= filters", false, "evidence") },
             "/api/locations": { "get": op("Locations with PM2.5 / greenspace", false, "environment") },
             "/api/aggregates": { "get": op("k-anonymized cohort distributions", false, "aggregates") },

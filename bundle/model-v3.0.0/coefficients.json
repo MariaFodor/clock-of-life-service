@@ -1,0 +1,193 @@
+{
+  "prediction": {
+    "smk_former": 0.1659515664340642,
+    "smk_current": 0.19389201812107032,
+    "cigs_day": 0.09408256472845007,
+    "activity": -0.23034158461150214,
+    "sleep_long": 0.3218797128476774,
+    "waist": 0.0,
+    "sbp": 0.08589127267702017,
+    "diabetes": 0.14302141370599375,
+    "high_bp": 0.19043379073475528,
+    "respiratory": 0.3097842558794932,
+    "mobility": 0.4467293528316219,
+    "cvd_hx": 0.4678869922368941,
+    "cancer_hx": 0.38763971163882077,
+    "education": 0.0,
+    "income": -0.18969383387448704,
+    "smk_current_x_young": 0.3540121608310617,
+    "activity_x_young": 0.14255820760858723,
+    "waist_x_young": 0.08179399828387934
+  },
+  "total_effect": {
+    "smk_former": 0.1262987326468818,
+    "smk_current": 0.5439531113767782,
+    "cigs_day": 0.16212907555521705,
+    "activity": -0.27340783306549316,
+    "waist": 0.03063271246249437
+  },
+  "total_effect_sd": {
+    "smk_former": 0.0425105621194833,
+    "smk_current": 0.05187172975365166,
+    "cigs_day": 0.016672190678776417,
+    "activity": 0.02056146733961046,
+    "waist": 0.023455142595327508
+  },
+  "total_effect_source": {
+    "smk_former": "prior_blended",
+    "smk_current": "prior_blended",
+    "cigs_day": "prior_blended",
+    "activity": "prior_blended",
+    "waist": "prior_blended"
+  },
+  "adjustment_sets": {
+    "smk_former": [
+      "education",
+      "income"
+    ],
+    "smk_current": [
+      "education",
+      "income"
+    ],
+    "cigs_day": [
+      "education",
+      "income"
+    ],
+    "activity": [
+      "smk_current",
+      "education",
+      "income"
+    ],
+    "waist": [
+      "smk_former",
+      "smk_current",
+      "activity",
+      "education",
+      "income"
+    ]
+  },
+  "strata": {
+    "age_bands": [
+      0,
+      45,
+      55,
+      65,
+      200
+    ],
+    "by_sex": true,
+    "rationale": "min 66 deaths/stratum; net young-smoking -0.547 -> +0.542; within-stratum C 0.666 -> 0.688",
+    "measured": "2026-09-09"
+  },
+  "attribution": {
+    "smk_former": 0.1262987326468818,
+    "smk_current": 0.5439531113767782,
+    "cigs_day": 0.16212907555521705,
+    "activity": -0.27340783306549316,
+    "waist": 0.03063271246249437
+  },
+  "standardizer": {
+    "activity": {
+      "mean": 4.629776223791129,
+      "sd": 2.9744461926378754
+    },
+    "waist": {
+      "mean": 98.83248580073253,
+      "sd": 16.276964722810213
+    },
+    "income": {
+      "mean": 2.486683475768353,
+      "sd": 1.63858124918941
+    },
+    "cigs_day": {
+      "mean": 2.6173600222022335,
+      "sd": 6.676930281083862
+    },
+    "sbp": {
+      "mean": 123.04804015044523,
+      "sd": 17.980683606603467
+    },
+    "diet": {
+      "mean": 2.5,
+      "sd": 1.12
+    },
+    "sedentary": {
+      "mean": 6.0,
+      "sd": 2.5
+    },
+    "stress": {
+      "mean": 6.11,
+      "sd": 3.14
+    }
+  },
+  "literature": {
+    "diet": {
+      "beta": -0.15,
+      "grade": "strong",
+      "kind": "continuous_z",
+      "citation": "Trichopoulou 2003 (Mediterranean diet score); PREDIMED",
+      "note": "per +1 SD of Mediterranean-style diet score; higher = lower risk",
+      "standardizer": {
+        "mean": 2.5,
+        "sd": 1.12,
+        "source": "assumed binomial(5, 0.5) on the 0-5 item sum"
+      },
+      "reference": {
+        "kind": "mean"
+      }
+    },
+    "sedentary": {
+      "beta": 0.08,
+      "grade": "moderate",
+      "kind": "continuous_z",
+      "citation": "Chau 2013 sitting-time meta-analysis",
+      "note": "per +1 SD sitting hours; modelled jointly with activity (offset is real)",
+      "standardizer": {
+        "mean": 6.0,
+        "sd": 2.5,
+        "source": "assumed from Chau 2013 dose-response range"
+      },
+      "reference": {
+        "kind": "mean"
+      }
+    },
+    "stress": {
+      "beta": 0.05,
+      "grade": "weak",
+      "kind": "continuous_z",
+      "citation": "Cohen 1983 PSS; perceived-stress mortality cohorts",
+      "note": "per +1 SD perceived stress; low confidence",
+      "standardizer": {
+        "mean": 6.11,
+        "sd": 3.14,
+        "source": "Warttig 2013 PSS-4 population norms"
+      },
+      "reference": {
+        "kind": "mean"
+      }
+    },
+    "alcohol": {
+      "kind": "categorical_monotonic",
+      "grade": "strong_for_harm",
+      "citation": "GBD 2018/2020; Mendelian randomization (no safe level)",
+      "levels": {
+        "none": 0.0,
+        "light": 0.03,
+        "moderate": 0.12,
+        "heavy": 0.3
+      },
+      "note": "monotonic non-decreasing; never protective (J-curve refuted)",
+      "reference": {
+        "kind": "level",
+        "level": "light"
+      }
+    },
+    "env": {
+      "kind": "precomputed",
+      "beta": 1.0,
+      "grade": "moderate",
+      "citation": "WHO AQG (PM2.5 RR 1.095/10\u00b5g); Rojas-Rueda 2019 (greenspace)",
+      "note": "service computes ENV = ln(1.095)*(PM25-ref)/10 + ln(0.965)*(NDVI-ref)/0.1; coef 1.0"
+    }
+  },
+  "young_cutoff": 55
+}

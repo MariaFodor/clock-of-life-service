@@ -124,7 +124,7 @@ pub struct Estimate {
 
 /// Every design input that is z-scored against the bundle standardizer. `Bundle::load` validates
 /// these keys exist, so the indexing in `z()` cannot panic on a served bundle.
-pub const STANDARDIZED_KEYS: &[&str] = &["activity", "waist", "cigs_day", "bmi", "sbp", "income"];
+pub const STANDARDIZED_KEYS: &[&str] = &["activity", "waist", "cigs_day", "sbp", "income"];
 
 fn z(raw: f64, coefs: &Coefficients, key: &str) -> f64 {
     let s = &coefs.standardizer[key];
@@ -143,11 +143,10 @@ pub fn design(p: &Profile, coefs: &Coefficients) -> HashMap<String, f64> {
     // Current-smoker dose: 0 for never/former (matches the training encoding in config/features.py).
     let cigs = if p.smoke == 2 { p.cigs_day } else { 0.0 };
     d.insert("cigs_day".into(), z(cigs, coefs, "cigs_day"));
-    // An omitted BMI must be neutral: the standardizer mean scores exactly z = 0. A hardcoded
-    // constant (the old 27.0 vs the bundle mean 28.9) silently penalised every BMI-less request
-    // by RR ×1.33 (REVIEW-2026-09-09 S2).
-    let bmi = p.bmi.unwrap_or(coefs.standardizer["bmi"].mean);
-    d.insert("bmi".into(), z(bmi, coefs, "bmi"));
+    // BMI is deliberately NOT scored (REFIT-01). It is ~0.9 correlated with waist, and fitting both
+    // let BMI take a large negative coefficient — the shipped model rewarded being heavier. Waist is
+    // the adiposity measure. The field is still accepted and validated so older clients do not break;
+    // it simply does not enter the design.
     // Systolic BP: a real reading when known; otherwise derived from the high-BP answer
     // (NHANES hbp-conditional means), so the field refines rather than duplicates high_bp.
     let sbp = p.sbp.unwrap_or(if p.high_bp { 132.7 } else { 117.9 });
@@ -291,6 +290,16 @@ pub struct Attribution {
     pub role: String,
     pub evidence: String, // evidence grade
     pub citation: String,
+    /// The paper behind this factor — resolvable, verified when the ontology was written. The
+    /// product promises evidence traceability, and a prose citation does not keep that promise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub doi: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_author: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub year: Option<i32>,
 }
 
 /// Main-effect design keys (age-interaction `*_x_young` terms excluded) with user-facing labels.
@@ -330,9 +339,14 @@ pub fn attributions(bundle: &Bundle, p: &Profile) -> Result<Vec<Attribution>, St
         if x == 0.0 {
             continue; // no deviation from the reference on this factor
         }
-        // Total-effect coefficient for the levers; fitted (prediction) coefficient for the
-        // manage/context factors, which have no separate attribution term.
-        let c = match attr.get(*key).or_else(|| bundle.coefficients.prediction.get(*key)) {
+        // Total effect where the ontology's causal graph gave us one (levers); otherwise the
+        // fitted prediction coefficient, for manage/context factors that are never recommended.
+        // Order matters: `total_effect` is the M10 fix — it is the only coefficient that answers
+        // "what would change if you changed this", because it does not condition on the diseases
+        // this factor causes.
+        let c = match bundle.coefficients.total_effect.get(*key)
+            .or_else(|| attr.get(*key))
+            .or_else(|| bundle.coefficients.prediction.get(*key)) {
             Some(c) => *c,
             None => continue,
         };
@@ -351,6 +365,10 @@ pub fn attributions(bundle: &Bundle, p: &Profile) -> Result<Vec<Attribution>, St
             role: ev.map(|e| e.role.clone()).unwrap_or_default(),
             evidence: ev.map(|e| e.grade.clone()).unwrap_or_default(),
             citation: ev.map(|e| e.citation.clone()).unwrap_or_default(),
+            url: ev.and_then(|e| e.url.clone()),
+            doi: ev.and_then(|e| e.doi.clone()),
+            first_author: ev.and_then(|e| e.first_author.clone()),
+            year: ev.and_then(|e| e.year),
         });
     }
     // Literature levers (LEV-03): same removal semantics — each answered, non-reference lever shows
@@ -380,6 +398,10 @@ pub fn attributions(bundle: &Bundle, p: &Profile) -> Result<Vec<Attribution>, St
             role: ev.map(|e| e.role.clone()).unwrap_or_else(|| "lever".into()),
             evidence: ev.map(|e| e.grade.clone()).unwrap_or_default(),
             citation: ev.map(|e| e.citation.clone()).unwrap_or_default(),
+            url: ev.and_then(|e| e.url.clone()),
+            doi: ev.and_then(|e| e.doi.clone()),
+            first_author: ev.and_then(|e| e.first_author.clone()),
+            year: ev.and_then(|e| e.year),
         });
     }
     out.sort_by(|a, b| {
@@ -458,9 +480,15 @@ pub fn whatif(bundle: &Bundle, base: &Profile, changes: &WhatIfChanges) -> Resul
     let attr = &bundle.coefficients.attribution;
     let d0 = design(base, &bundle.coefficients);
     let d1 = design(&modified, &bundle.coefficients);
-    let d_lp: f64 = attr.iter()
-        .filter(|(k, _)| !k.ends_with("_x_young"))
-        .map(|(k, c)| c * (d1.get(k).copied().unwrap_or(0.0) - d0.get(k).copied().unwrap_or(0.0)))
+    // Prefer the total effect per key, for the same reason attribution does.
+    let coef_for = |k: &str| -> f64 {
+        bundle.coefficients.total_effect.get(k).or_else(|| attr.get(k)).copied().unwrap_or(0.0)
+    };
+    let keys: std::collections::HashSet<&String> =
+        attr.keys().chain(bundle.coefficients.total_effect.keys()).collect();
+    let d_lp: f64 = keys.into_iter()
+        .filter(|k| !k.ends_with("_x_young"))
+        .map(|k| coef_for(k) * (d1.get(k).copied().unwrap_or(0.0) - d0.get(k).copied().unwrap_or(0.0)))
         .sum::<f64>()
         // Literature levers are standalone total effects — their scenario delta is the same
         // deviation arithmetic the estimate uses.
@@ -536,13 +564,15 @@ mod tests {
     use std::path::Path;
 
     fn bundle() -> Bundle {
-        Bundle::load(Path::new("bundle/model-v2.2.0")).expect("bundle loads")
+        Bundle::load(Path::new("bundle/model-v3.0.0")).expect("bundle loads")
     }
 
     #[test]
-    fn omitted_bmi_is_neutral() {
-        // A profile without BMI must score z = 0 on the bmi term — the standardizer mean, not a
-        // hardcoded constant (the old 27.0 default silently added RR ×1.33; REVIEW-2026-09-09 S2).
+    fn bmi_is_accepted_but_never_scored() {
+        // BMI is still accepted from clients (older builds send it) and still range-validated, but
+        // since REFIT-01 it does not enter the design at all: fitting it alongside waist, with which
+        // it is ~0.9 correlated, is what let it take a large negative coefficient and reward being
+        // heavier. Two profiles differing ONLY in BMI must therefore score identically.
         let b = bundle();
         let p = Profile {
             country: "RO".into(), age: 40.0, sex: "M".into(), smoke: 0, pa_min: 600.0, sleep: 7.0,
@@ -551,8 +581,18 @@ mod tests {
             pm25: None, ndvi: None, diet_score: None, alcohol: None, sitting_hours: None,
             stress_score: None, mobility: None,
         };
-        let d = design(&p, &b.coefficients);
-        assert!(d["bmi"].abs() < 1e-12, "omitted bmi must be exactly neutral, got z = {}", d["bmi"]);
+        assert!(!design(&p, &b.coefficients).contains_key("bmi"), "bmi must not be a design key");
+        let mut lean = p.clone();
+        lean.bmi = Some(20.0);
+        let mut obese = p.clone();
+        obese.bmi = Some(40.0);
+        assert_eq!(estimate(&b, &lean).unwrap().estimate_years,
+                   estimate(&b, &obese).unwrap().estimate_years,
+                   "BMI must not move the estimate — waist is the adiposity measure");
+        // And an out-of-range value is still refused rather than silently ignored.
+        let mut absurd = p.clone();
+        absurd.bmi = Some(200.0);
+        assert!(absurd.validate().is_err());
     }
 
     fn plain_profile() -> Profile {
@@ -741,7 +781,19 @@ mod tests {
         assert!(smoking.delta_years < 0.0, "current smoking costs years");
         assert_eq!(smoking.evidence, "strong");
         assert!(why.iter().any(|a| a.factor == "Diabetes" && a.delta_years < 0.0), "diabetes explained");
-        // A protective factor reads positive.
-        assert!(why.iter().any(|a| a.factor == "Education" && a.delta_years > 0.0), "education adds years");
+        // No protective factor may ever read as harmful. Education's own effect is not detectable in
+        // this cohort once the fit is stratified by age and sex — the sign constraint holds it at
+        // exactly 0 rather than letting noise turn it into "school shortens your life", so it simply
+        // drops out of the breakdown. That is the constraint doing its job, not a missing factor.
+        // (The sign of a delta belongs to the PERSON, not the factor: a sedentary person's activity
+        // correctly reads negative. What must never happen is a factor whose coefficient has the
+        // wrong sign — and that is guaranteed upstream, by the ontology constraints in the fit.)
+        // Education's own effect is not detectable in this cohort once the fit is stratified by age
+        // and sex; the sign constraint holds it at exactly 0 rather than letting noise turn it into
+        // "school shortens your life", so it simply drops out of the breakdown.
+        // Every factor shown to a user carries an openable article, not a prose citation.
+        for a in &why {
+            assert!(a.url.is_some(), "{} has no article link", a.factor);
+        }
     }
 }

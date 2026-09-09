@@ -45,6 +45,15 @@ pub struct Coefficients {
     pub prediction: HashMap<String, f64>,
     pub attribution: HashMap<String, f64>,
     pub standardizer: HashMap<String, Stat>,
+    /// Per-lever TOTAL effects: each fitted on the adjustment set the causal graph implies
+    /// (confounders only, never mediators) and precision-weighted against its literature prior.
+    /// They answer "what changes if you change this", which is what What-If and the
+    /// recommendations need. Never summed with `prediction` — that would double-count every
+    /// mediated path. Empty for pre-v3.0.0 bundles.
+    #[serde(default)]
+    pub total_effect: HashMap<String, f64>,
+    #[serde(default)]
+    pub total_effect_sd: HashMap<String, f64>,
     /// Pre-v2.2.0 bundles ship this without standardizers/references and are refused by the gate.
     #[serde(default)]
     pub literature: HashMap<String, LiteratureFeature>,
@@ -85,14 +94,30 @@ pub struct Evidence {
     pub role: String,
     pub grade: String,
     pub citation: String,
+    /// DOI of the backing paper, verified against Crossref when the ontology entry was written —
+    /// a citation nobody can open is not a citation.
+    #[serde(default)]
+    pub doi: Option<String>,
+    /// Resolvable link, so the web can put the actual article behind each indicator.
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub first_author: Option<String>,
+    #[serde(default)]
+    pub year: Option<i32>,
+    #[serde(default)]
+    pub study_slug: Option<String>,
 }
 
 pub struct Bundle {
     pub manifest: Manifest,
     pub coefficients: Coefficients,
     pub baselines: HashMap<String, Baseline>,
-    /// feature key -> {role, grade, citation}; empty if the bundle ships no evidence.json.
+    /// feature key -> {role, grade, citation, doi, url}; empty if the bundle ships no evidence.json.
     pub evidence: HashMap<String, Evidence>,
+    /// The full ontology as shipped (roles, sign/shape constraints, causal graph, verified
+    /// citations). `Null` for pre-v3.0.0 bundles.
+    pub ontology: serde_json::Value,
 }
 
 fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, String> {
@@ -205,11 +230,16 @@ impl Bundle {
         // Evidence is supplementary (powers the "Why?" citations); tolerate its absence.
         let evidence: HashMap<String, Evidence> =
             read_json(&dir.join("evidence.json")).unwrap_or_default();
+        // The ontology travels with the model (v3.0.0+): roles, causal edges and verified article
+        // links come from the same file the fit was constrained by, rather than a second copy that
+        // can drift from it. Served verbatim so the web can draw the graph the model actually used.
+        let ontology: serde_json::Value =
+            read_json(&dir.join("ontology.json")).unwrap_or(serde_json::Value::Null);
         let mut baselines = HashMap::new();
         for iso in &manifest.countries {
             let b: Baseline = read_json(&dir.join("baselines").join(format!("{iso}.json")))?;
             baselines.insert(iso.clone(), b);
         }
-        Ok(Bundle { manifest, coefficients, baselines, evidence })
+        Ok(Bundle { manifest, coefficients, baselines, evidence, ontology })
     }
 }

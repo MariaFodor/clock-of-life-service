@@ -41,7 +41,7 @@ async fn state() -> Arc<AppState> {
             if std::env::var("JWT_SECRET").is_err() {
                 std::env::set_var("JWT_SECRET", "integration-test-secret");
             }
-            let s = init_state("bundle/model-v2.2.0", &test_db_url())
+            let s = init_state("bundle/model-v3.0.0", &test_db_url())
                 .await
                 .expect("init_state (is PostgreSQL running and clock_of_life_test present?)");
             sqlx::query("TRUNCATE scenario, calculation, answer RESTART IDENTITY CASCADE")
@@ -265,7 +265,7 @@ fn estimate_why_and_context_not_recommended() {
     let est = body_json(resp).await;
 
     // model provenance block.
-    assert_eq!(est["model"]["version"], "2.2.0");
+    assert_eq!(est["model"]["version"], "3.0.0");
     assert!(est["model"]["algorithm"].as_str().is_some());
     // why[] present, populated, each entry well-formed and sensibly signed.
     let why = est["why"].as_array().expect("why[] present");
@@ -577,7 +577,7 @@ fn admin_model_pin() {
     // Restore the real active model and remove the test row (shared DB). The restore must be
     // asserted: a silent 404 here (as with the stale "2.0.0" pin this replaced) leaves the DB with
     // zero active models and makes unrelated tests fail by ordering (REVIEW-2026-09-09 S12).
-    let restore = call(&s, post_auth("/api/admin/model/pin", json!({"semver": "2.2.0", "citation": "ops: restore"}), &admin)).await;
+    let restore = call(&s, post_auth("/api/admin/model/pin", json!({"semver": "3.0.0", "citation": "ops: restore"}), &admin)).await;
     assert_eq!(restore.status(), StatusCode::OK, "restoring the active model must succeed");
     sqlx::query("DELETE FROM model_version WHERE semver = '2.0.0-test'").execute(&s.pool).await.unwrap();
     });
@@ -1155,16 +1155,40 @@ fn admin_question_codes_are_safe() {
 /// synthetic bundles written to a temp dir.
 #[test]
 fn incompatible_bundle_refused_at_load() {
-    // v2.0.0 predates bmi/cigs_day/sbp -> design-standardizer arm.
-    let err = clock_of_life_service::bundle::Bundle::load(std::path::Path::new("bundle/model-v2.0.0"))
-        .err()
-        .expect("v2.0.0 bundle must be refused");
+    // Synthetic fixtures rather than vendored dead bundles: the historical v2.0.0/v2.1.0 copies
+    // existed only to be refused, so ONT-04 deleted them and the test builds what it needs. Each
+    // variant strips exactly one thing the scoring design requires.
+    let good: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string("bundle/model-v3.0.0/coefficients.json").unwrap(),
+    )
+    .unwrap();
+
+    let load_with = |patch: &dyn Fn(&mut serde_json::Value), tag: &str| -> String {
+        let mut coefs = good.clone();
+        patch(&mut coefs);
+        let dir = std::env::temp_dir().join(format!("clock-incompat-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("manifest.json"),
+            serde_json::json!({"version": "0.0.0-test", "algorithm": "cox_ph",
+                               "countries": [], "checksums": {}})
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(dir.join("coefficients.json"), coefs.to_string()).unwrap();
+        let err = clock_of_life_service::bundle::Bundle::load(&dir)
+            .err()
+            .unwrap_or_else(|| panic!("bundle variant '{tag}' must be refused"));
+        std::fs::remove_dir_all(&dir).ok();
+        err
+    };
+
+    // A standardizer the scoring design needs is gone -> design arm.
+    let err = load_with(&|c| { c["standardizer"].as_object_mut().unwrap().remove("waist"); }, "no-waist");
     assert!(err.contains("standardizer is missing"), "got: {err}");
 
-    // v2.1.0 ships a literature block without diet/sedentary/stress standardizers -> literature arm.
-    let err = clock_of_life_service::bundle::Bundle::load(std::path::Path::new("bundle/model-v2.1.0"))
-        .err()
-        .expect("v2.1.0 bundle must be refused (rollback to it is intentionally impossible)");
+    // A continuous literature lever without its standardizer -> literature arm.
+    let err = load_with(&|c| { c["standardizer"].as_object_mut().unwrap().remove("diet"); }, "no-diet-std");
     assert!(err.contains("literature lever"), "got: {err}");
 }
 

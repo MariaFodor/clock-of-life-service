@@ -1,0 +1,222 @@
+{
+  "age": {
+    "role": "baseline",
+    "grade": "na",
+    "citation": "",
+    "doi": null,
+    "url": null,
+    "first_author": null,
+    "year": null,
+    "study_slug": null
+  },
+  "sex": {
+    "role": "baseline",
+    "grade": "na",
+    "citation": "",
+    "doi": null,
+    "url": null,
+    "first_author": null,
+    "year": null,
+    "study_slug": null
+  },
+  "education": {
+    "role": "context",
+    "grade": "na",
+    "citation": "Socioeconomic Inequalities in Health in 22 European Countries",
+    "doi": "10.1056/NEJMsa0707519",
+    "url": "https://doi.org/10.1056/NEJMsa0707519",
+    "first_author": "Mackenbach",
+    "year": 2008,
+    "study_slug": "ses-gradient"
+  },
+  "income": {
+    "role": "context",
+    "grade": "na",
+    "citation": "Socioeconomic Inequalities in Health in 22 European Countries",
+    "doi": "10.1056/NEJMsa0707519",
+    "url": "https://doi.org/10.1056/NEJMsa0707519",
+    "first_author": "Mackenbach",
+    "year": 2008,
+    "study_slug": "ses-gradient"
+  },
+  "smk_former": {
+    "role": "lever",
+    "grade": "strong",
+    "citation": "Mortality in relation to smoking: 50 years' observations on male British doctors",
+    "doi": "10.1136/bmj.38142.554479.AE",
+    "url": "https://doi.org/10.1136/bmj.38142.554479.AE",
+    "first_author": "Doll",
+    "year": 2004,
+    "study_slug": "smoking-doll-peto"
+  },
+  "smk_current": {
+    "role": "lever",
+    "grade": "strong",
+    "citation": "21st-Century Hazards of Smoking and Benefits of Cessation in the United States",
+    "doi": "10.1056/NEJMsa1211128",
+    "url": "https://doi.org/10.1056/NEJMsa1211128",
+    "first_author": "Jha",
+    "year": 2013,
+    "study_slug": "smoking-cessation"
+  },
+  "cigs_day": {
+    "role": "lever",
+    "grade": "strong",
+    "citation": "Mortality in relation to smoking: 50 years' observations on male British doctors",
+    "doi": "10.1136/bmj.38142.554479.AE",
+    "url": "https://doi.org/10.1136/bmj.38142.554479.AE",
+    "first_author": "Doll",
+    "year": 2004,
+    "study_slug": "smoking-doll-peto"
+  },
+  "activity": {
+    "role": "lever",
+    "grade": "strong",
+    "citation": "Leisure Time Physical Activity and Mortality",
+    "doi": "10.1001/jamainternmed.2015.0533",
+    "url": "https://doi.org/10.1001/jamainternmed.2015.0533",
+    "first_author": "Arem",
+    "year": 2015,
+    "study_slug": "activity-arem"
+  },
+  "sedentary": {
+    "role": "lever",
+    "grade": "moderate",
+    "citation": "Daily Sitting Time and All-Cause Mortality: A Meta-Analysis",
+    "doi": "10.1371/journal.pone.0080000",
+    "url": "https://doi.org/10.1371/journal.pone.0080000",
+    "first_author": "Chau",
+    "year": 2013,
+    "study_slug": "sitting-time"
+  },
+  "sleep_long": {
+    "role": "marker",
+    "grade": "moderate",
+    "citation": "Sleep Duration and All-Cause Mortality: A Systematic Review and Meta-Analysis",
+    "doi": "10.1093/sleep/33.5.585",
+    "url": "https://doi.org/10.1093/sleep/33.5.585",
+    "first_author": "Cappuccio",
+    "year": 2010,
+    "study_slug": "sleep-cappuccio"
+  },
+  "waist": {
+    "role": "lever",
+    "grade": "strong",
+    "citation": "Central fatness and risk of all cause mortality: systematic review and dose-response meta-analysis",
+    "doi": "10.1136/bmj.m3324",
+    "url": "https://doi.org/10.1136/bmj.m3324",
+    "first_author": "Jayedi",
+    "year": 2020,
+    "study_slug": "waist-mortality"
+  },
+  "diet": {
+    "role": "lever",
+    "grade": "strong",
+    "citation": "Adherence to a Mediterranean Diet and Survival in a Greek Population",
+    "doi": "10.1056/NEJMoa025039",
+    "url": "https://doi.org/10.1056/NEJMoa025039",
+    "first_author": "Trichopoulou",
+    "year": 2003,
+    "study_slug": "mediterranean-diet"
+  },
+  "alcohol": {
+    "role": "lever",
+    "grade": "strong",
+    "citation": "Alcohol use and burden for 195 countries and territories, 1990-2016",
+    "doi": "10.1016/S0140-6736(18)31310-2",
+    "url": "https://doi.org/10.1016/S0140-6736(18)31310-2",
+    "first_author": "Griswold",
+    "year": 2018,
+    "study_slug": "alcohol-gbd"
+  },
+  "stress": {
+    "role": "lever",
+    "grade": "weak",
+    "citation": "A Global Measure of Perceived Stress",
+    "doi": "10.2307/2136404",
+    "url": "https://doi.org/10.2307/2136404",
+    "first_author": "Cohen",
+    "year": 1983,
+    "study_slug": "pss-stress"
+  },
+  "sbp": {
+    "role": "manage",
+    "grade": "strong",
+    "citation": "Age-specific relevance of usual blood pressure to vascular mortality",
+    "doi": "10.1016/S0140-6736(02)11911-8",
+    "url": "https://doi.org/10.1016/S0140-6736(02)11911-8",
+    "first_author": "Prospective Studies Collaboration",
+    "year": 2002,
+    "study_slug": "blood-pressure-psc"
+  },
+  "diabetes": {
+    "role": "manage",
+    "grade": "strong",
+    "citation": "Diabetes Mellitus, Fasting Glucose, and Risk of Cause-Specific Death",
+    "doi": "10.1056/NEJMoa1008862",
+    "url": "https://doi.org/10.1056/NEJMoa1008862",
+    "first_author": "Emerging Risk Factors Collaboration",
+    "year": 2011,
+    "study_slug": "diabetes-mortality"
+  },
+  "high_bp": {
+    "role": "manage",
+    "grade": "strong",
+    "citation": "Age-specific relevance of usual blood pressure to vascular mortality",
+    "doi": "10.1016/S0140-6736(02)11911-8",
+    "url": "https://doi.org/10.1016/S0140-6736(02)11911-8",
+    "first_author": "Prospective Studies Collaboration",
+    "year": 2002,
+    "study_slug": "blood-pressure-psc"
+  },
+  "respiratory": {
+    "role": "manage",
+    "grade": "strong",
+    "citation": "Global burden of COPD: systematic review and meta-analysis",
+    "doi": "10.1183/09031936.06.00124605",
+    "url": "https://doi.org/10.1183/09031936.06.00124605",
+    "first_author": "Halbert",
+    "year": 2006,
+    "study_slug": "copd-halbert"
+  },
+  "mobility": {
+    "role": "marker",
+    "grade": "strong",
+    "citation": "Gait Speed and Survival in Older Adults",
+    "doi": "10.1001/jama.2010.1923",
+    "url": "https://doi.org/10.1001/jama.2010.1923",
+    "first_author": "Studenski",
+    "year": 2011,
+    "study_slug": "mobility-studenski"
+  },
+  "cvd_hx": {
+    "role": "context",
+    "grade": "strong",
+    "citation": "Association of Cardiometabolic Multimorbidity With Mortality",
+    "doi": "10.1001/jama.2015.7008",
+    "url": "https://doi.org/10.1001/jama.2015.7008",
+    "first_author": "Di Angelantonio",
+    "year": 2015,
+    "study_slug": "cvd-multimorbidity"
+  },
+  "cancer_hx": {
+    "role": "context",
+    "grade": "strong",
+    "citation": "Cancer treatment and survivorship statistics, 2019",
+    "doi": "10.3322/caac.21565",
+    "url": "https://doi.org/10.3322/caac.21565",
+    "first_author": "Miller",
+    "year": 2019,
+    "study_slug": "cancer-survivorship"
+  },
+  "env": {
+    "role": "context",
+    "grade": "moderate",
+    "citation": "An Integrated Risk Function for Estimating the Global Burden of Disease Attributable to Ambient Fine Particulate Matter Exposure",
+    "doi": "10.1289/ehp.1307049",
+    "url": "https://doi.org/10.1289/ehp.1307049",
+    "first_author": "Burnett",
+    "year": 2014,
+    "study_slug": "greenspace"
+  }
+}

@@ -91,7 +91,7 @@ def main():
         check("GET /health 200", get("/health")[0] == 200)
 
         s, meta = get("/api/meta")
-        check("GET /api/meta model 2.2.0", meta.get("model_version") == "2.2.0", str(meta.get("model_version")))
+        check("GET /api/meta model 3.0.0", meta.get("model_version") == "3.0.0", str(meta.get("model_version")))
         check("meta lists 30 countries", len(meta.get("countries", [])) == 30, str(len(meta.get("countries", []))))
 
         ro = {"country": "RO", "age": 40, "sex": "M", "smoke": 0, "pa_min": 2000, "sleep": 7,
