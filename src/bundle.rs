@@ -54,6 +54,12 @@ pub struct Coefficients {
     pub total_effect: HashMap<String, f64>,
     #[serde(default)]
     pub total_effect_sd: HashMap<String, f64>,
+    /// Neutral values for optional inputs, supplied by the model rather than invented here.
+    /// Currently `cigs_day_when_current_smoker`: since the smoking contrast was corrected,
+    /// `smk_current` no longer absorbs dose, so a smoker who skips the dose question must be
+    /// scored at the smokers' mean and not at zero.
+    #[serde(default)]
+    pub conditional_defaults: HashMap<String, f64>,
     /// Pre-v2.2.0 bundles ship this without standardizers/references and are refused by the gate.
     #[serde(default)]
     pub literature: HashMap<String, LiteratureFeature>,

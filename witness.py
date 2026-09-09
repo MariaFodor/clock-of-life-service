@@ -91,7 +91,7 @@ def main():
         check("GET /health 200", get("/health")[0] == 200)
 
         s, meta = get("/api/meta")
-        check("GET /api/meta model 3.0.0", meta.get("model_version") == "3.0.0", str(meta.get("model_version")))
+        check("GET /api/meta model 3.0.1", meta.get("model_version") == "3.0.1", str(meta.get("model_version")))
         check("meta lists 30 countries", len(meta.get("countries", [])) == 30, str(len(meta.get("countries", []))))
 
         ro = {"country": "RO", "age": 40, "sex": "M", "smoke": 0, "pa_min": 2000, "sleep": 7,
@@ -137,7 +137,7 @@ def main():
 
         # 1. Unanswered levers and answers at their centring reference are the same number.
         #    (The bundle's references: standardizer means for diet/sedentary/stress, level "light"
-        #    for alcohol — see bundle/model-v3.0.0/coefficients.json. A bundle change makes this
+        #    for alcohol — see bundle/model-v3.0.1/coefficients.json. A bundle change makes this
         #    FAIL loudly rather than drift.) relative_risk is compared too: it is rounded to 3 dp
         #    against the years' 1 dp, so it catches a centring drift ~6x smaller.
         at_reference = {**plain, "diet_score": 2.5, "sitting_hours": 6.0,

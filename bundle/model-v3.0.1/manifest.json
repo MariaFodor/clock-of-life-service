@@ -1,5 +1,5 @@
 {
-  "version": "3.0.0",
+  "version": "3.0.1",
   "algorithm": "cox_ph",
   "reference_population": "per-country (Eurostat)",
   "training_cohort": "NHANES 2007-2014 + NCHS Linked Mortality",
@@ -48,9 +48,9 @@
     "SK"
   ],
   "checksums": {
-    "model-card.md": "5fc3843df4dbcc20",
-    "ontology.json": "7b5278008009a286",
-    "coefficients.json": "8c2439d791723602",
+    "model-card.md": "91f48927231738fd",
+    "ontology.json": "1790f4d52e0194f4",
+    "coefficients.json": "f376bcfea7f21c5a",
     "evidence.json": "f2fb09324d6b1b28",
     "baselines/DE.json": "242e953ec63c2fc5",
     "baselines/FI.json": "1b545ebe32537046",

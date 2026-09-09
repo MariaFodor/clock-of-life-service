@@ -1,4 +1,4 @@
-# Model card — The Clock of Life v3.0.0
+# Model card — The Clock of Life v3.0.1
 
 **Algorithm:** Cox proportional hazards (interpretable), lifestyle + pathology predictors; age & sex to
 the national life-table baseline. **Attribution/What-If** uses a separate total-effect model.

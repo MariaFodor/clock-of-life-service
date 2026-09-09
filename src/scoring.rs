@@ -148,8 +148,22 @@ pub fn design(p: &Profile, coefs: &Coefficients) -> HashMap<String, f64> {
     let mut d = HashMap::new();
     d.insert("smk_former".into(), if p.smoke == 1 { 1.0 } else { 0.0 });
     d.insert("smk_current".into(), smk_current);
-    // Current-smoker dose: 0 for never/former (matches the training encoding in config/features.py).
-    let cigs = if p.smoke == 2 { p.cigs_day } else { 0.0 };
+    // Current-smoker dose: 0 for never/former, matching the training encoding. A CURRENT smoker who
+    // did not answer the dose question is scored at the cohort's smoker mean from the bundle, not at
+    // zero — since the contrast fix, `smk_current` no longer carries dose, so zero would describe a
+    // smoker who smokes nothing (REVIEW S9).
+    let cigs = if p.smoke == 2 {
+        if p.cigs_day > 0.0 {
+            p.cigs_day
+        } else {
+            coefs.conditional_defaults
+                .get("cigs_day_when_current_smoker")
+                .copied()
+                .unwrap_or(0.0)
+        }
+    } else {
+        0.0
+    };
     d.insert("cigs_day".into(), z(cigs, coefs, "cigs_day"));
     // BMI is deliberately NOT scored (REFIT-01). It is ~0.9 correlated with waist, and fitting both
     // let BMI take a large negative coefficient — the shipped model rewarded being heavier. Waist is
@@ -584,7 +598,7 @@ mod tests {
     use std::path::Path;
 
     fn bundle() -> Bundle {
-        Bundle::load(Path::new("bundle/model-v3.0.0")).expect("bundle loads")
+        Bundle::load(Path::new("bundle/model-v3.0.1")).expect("bundle loads")
     }
 
     #[test]

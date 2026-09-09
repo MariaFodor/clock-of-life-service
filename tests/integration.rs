@@ -41,7 +41,7 @@ async fn state() -> Arc<AppState> {
             if std::env::var("JWT_SECRET").is_err() {
                 std::env::set_var("JWT_SECRET", "integration-test-secret");
             }
-            let s = init_state("bundle/model-v3.0.0", &test_db_url())
+            let s = init_state("bundle/model-v3.0.1", &test_db_url())
                 .await
                 .expect("init_state (is PostgreSQL running and clock_of_life_test present?)");
             sqlx::query("TRUNCATE scenario, calculation, answer RESTART IDENTITY CASCADE")
@@ -265,7 +265,7 @@ fn estimate_why_and_context_not_recommended() {
     let est = body_json(resp).await;
 
     // model provenance block.
-    assert_eq!(est["model"]["version"], "3.0.0");
+    assert_eq!(est["model"]["version"], "3.0.1");
     assert!(est["model"]["algorithm"].as_str().is_some());
     // why[] present, populated, each entry well-formed and sensibly signed.
     let why = est["why"].as_array().expect("why[] present");
@@ -353,8 +353,13 @@ fn recommendations_rank_and_scope() {
     let recs = body_json(resp).await;
     let arr = recs.as_array().expect("array");
     assert!(!arr.is_empty(), "high-risk profile gets recommendations");
-    // Top recommendation is quitting smoking (highest impact × priority).
-    assert_eq!(arr[0]["feature"], "smk_current");
+    // Smoking is among the top advice, but not unconditionally first. This profile does literally
+    // ZERO activity, and for someone at that extreme the model says getting moving is worth
+    // marginally more than quitting (3.4 vs 3.0 years). Asserting a fixed winner encoded an
+    // assumption that only held while smk_current still absorbed the cigarette dose; what the
+    // product actually promises is that the ranking follows impact x confidence x priority.
+    let top: Vec<&str> = arr.iter().take(2).map(|r| r["feature"].as_str().unwrap()).collect();
+    assert!(top.contains(&"smk_current"), "smoking is top advice for a smoker, got {top:?}");
     // Sorted by descending score; every recommendation is a lever or manage factor (never context).
     for pair in arr.windows(2) {
         assert!(pair[0]["score"].as_f64().unwrap() >= pair[1]["score"].as_f64().unwrap(), "sorted by score");
@@ -577,7 +582,7 @@ fn admin_model_pin() {
     // Restore the real active model and remove the test row (shared DB). The restore must be
     // asserted: a silent 404 here (as with the stale "2.0.0" pin this replaced) leaves the DB with
     // zero active models and makes unrelated tests fail by ordering (REVIEW-2026-09-09 S12).
-    let restore = call(&s, post_auth("/api/admin/model/pin", json!({"semver": "3.0.0", "citation": "ops: restore"}), &admin)).await;
+    let restore = call(&s, post_auth("/api/admin/model/pin", json!({"semver": "3.0.1", "citation": "ops: restore"}), &admin)).await;
     assert_eq!(restore.status(), StatusCode::OK, "restoring the active model must succeed");
     sqlx::query("DELETE FROM model_version WHERE semver = '2.0.0-test'").execute(&s.pool).await.unwrap();
     });
@@ -1160,7 +1165,7 @@ fn incompatible_bundle_refused_at_load() {
     // existed only to be refused, so ONT-04 deleted them and the test builds what it needs. Each
     // variant strips exactly one thing the scoring design requires.
     let good: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string("bundle/model-v3.0.0/coefficients.json").unwrap(),
+        &std::fs::read_to_string("bundle/model-v3.0.1/coefficients.json").unwrap(),
     )
     .unwrap();
 
@@ -1204,7 +1209,7 @@ fn incompatible_bundle_refused_at_load() {
 #[test]
 fn literature_gate_refuses_each_malformed_variant() {
     let good: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string("bundle/model-v3.0.0/coefficients.json").unwrap(),
+        &std::fs::read_to_string("bundle/model-v3.0.1/coefficients.json").unwrap(),
     )
     .unwrap();
 
@@ -1296,7 +1301,7 @@ fn literature_levers_surface_everywhere() {
 #[test]
 fn seed_roles_match_the_shipped_ontology() {
     let ont: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string("bundle/model-v3.0.0/ontology.json").unwrap(),
+        &std::fs::read_to_string("bundle/model-v3.0.1/ontology.json").unwrap(),
     )
     .unwrap();
     let feats: Vec<serde_json::Value> = serde_json::from_str(
@@ -1356,7 +1361,7 @@ fn reconciliation_spares_admin_authored_rules() {
     .unwrap();
 
     // Reconcile again, exactly as a restart would.
-    seed::reconcile(&s.pool, &s.bundle.manifest, "bundle/model-v3.0.0").await.unwrap();
+    seed::reconcile(&s.pool, &s.bundle.manifest, "bundle/model-v3.0.1").await.unwrap();
 
     let still_active: bool = sqlx::query_scalar("SELECT active FROM recommendation_rule WHERE code = $1")
         .bind(&code)
@@ -1378,7 +1383,7 @@ fn reconciliation_spares_admin_authored_rules() {
     .execute(&s.pool)
     .await
     .unwrap();
-    seed::reconcile(&s.pool, &s.bundle.manifest, "bundle/model-v3.0.0").await.unwrap();
+    seed::reconcile(&s.pool, &s.bundle.manifest, "bundle/model-v3.0.1").await.unwrap();
     let active: bool = sqlx::query_scalar("SELECT active FROM recommendation_rule WHERE code = $1")
         .bind(&gone).fetch_one(&s.pool).await.unwrap();
     assert!(!active, "a seed-owned rule missing from the seed must be withdrawn");
@@ -1413,5 +1418,38 @@ fn whatif_refuses_sleep_with_a_reason() {
     let resp = call(&s, post("/api/whatif",
         json!({"base": base, "changes": {"smoke": 0, "sleep": 9.5}}))).await;
     assert_eq!(resp.status(), StatusCode::OK, "unchanged sleep must not refuse the scenario");
+    });
+}
+
+/// A current smoker who skips the dose question must be scored as an average smoker, not as one
+/// who smokes nothing. Before the smoking contrast was corrected, `smk_current` absorbed the dose
+/// and this barely mattered; afterwards, a zero default describes a cell nobody occupies.
+#[test]
+fn a_smoker_who_skips_the_dose_is_scored_as_an_average_smoker() {
+    RT.block_on(async {
+    let s = state().await;
+    let profile = |cigs: Option<f64>| {
+        let mut p = json!({"country": "RO", "age": 55, "sex": "M", "smoke": 2, "pa_min": 600,
+                           "sleep": 7, "waist": 95});
+        if let Some(c) = cigs { p["cigs_day"] = json!(c); }
+        p
+    };
+    let years = |v: serde_json::Value| async {
+        let r = call(&s, post("/api/estimate", v)).await;
+        body_json(r).await["estimate_years"].as_f64().unwrap()
+    };
+    let unstated = years(profile(None)).await;
+    let typical = years(profile(Some(12.0))).await;
+    let heavy = years(profile(Some(40.0))).await;
+
+    // Saying nothing lands near the average smoker.
+    assert!((unstated - typical).abs() < 0.5,
+            "unstated dose {unstated} should score near a typical smoker {typical}");
+    // And a stated dose still moves the number, so the default is a floor, not a ceiling.
+    assert!(heavy < unstated, "40/day {heavy} must score worse than an unstated dose {unstated}");
+
+    // Note: a CURRENT smoker stating 0/day is self-contradictory input, and is treated the same as
+    // not answering. Distinguishing them would need cigs_day to become Option<f64>; the model has
+    // no coefficient for "smokes but smokes nothing" either way.
     });
 }
