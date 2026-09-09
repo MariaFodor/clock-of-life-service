@@ -45,7 +45,7 @@ pub struct Coefficients {
     pub prediction: HashMap<String, f64>,
     pub attribution: HashMap<String, f64>,
     pub standardizer: HashMap<String, Stat>,
-    /// Empty for pre-v2.2.0 bundles (which are refused by the usability gate anyway).
+    /// Pre-v2.2.0 bundles ship this without standardizers/references and are refused by the gate.
     #[serde(default)]
     pub literature: HashMap<String, LiteratureFeature>,
     pub young_cutoff: f64,
@@ -135,23 +135,61 @@ impl Bundle {
                 ));
             }
         }
-        // Same rule for the literature levers: a continuous term the service z-scores must ship its
-        // standardizer, and a categorical one its levels — otherwise refuse at startup, not mid-request.
+        // Same fail-closed rule for the literature levers (PR#1 F2/F3): every declared kind is
+        // fully checked, and an unknown kind refuses outright — a typo must never slip past the
+        // gate and panic mid-request instead.
         for (key, lit) in &coefficients.literature {
             match lit.kind.as_str() {
-                "continuous_z" if !coefficients.standardizer.contains_key(key) => {
-                    return Err(format!(
-                        "coefficients.json: literature lever '{key}' is continuous_z but has no \
-                         standardizer entry — refusing this bundle"
-                    ));
+                "continuous_z" => {
+                    if !coefficients.standardizer.contains_key(key) {
+                        return Err(format!(
+                            "coefficients.json: literature lever '{key}' is continuous_z but has no \
+                             standardizer entry — refusing this bundle"
+                        ));
+                    }
+                    // The scorer assumes mean-centring (z(reference) = 0); any other centring would
+                    // be silently ignored, so it is refused instead.
+                    if lit.reference.as_ref().map(|r| r.kind.as_str()) != Some("mean") {
+                        return Err(format!(
+                            "coefficients.json: continuous literature lever '{key}' must declare \
+                             reference kind \"mean\" — refusing this bundle"
+                        ));
+                    }
                 }
-                "categorical_monotonic" if lit.levels.is_none() => {
-                    return Err(format!(
+                "categorical_monotonic" => {
+                    let levels = lit.levels.as_ref().ok_or_else(|| format!(
                         "coefficients.json: literature lever '{key}' is categorical but ships no \
                          levels — refusing this bundle"
+                    ))?;
+                    if key == "alcohol" {
+                        for lvl in crate::scoring::ALCOHOL_LEVELS {
+                            if !levels.contains_key(*lvl) {
+                                return Err(format!(
+                                    "coefficients.json: alcohol levels are missing '{lvl}' — a \
+                                     missing level would silently score 0.0 — refusing this bundle"
+                                ));
+                            }
+                        }
+                    }
+                    let reference = lit.reference.as_ref().and_then(|r| r.level.as_deref());
+                    match reference {
+                        Some(r) if levels.contains_key(r) => {}
+                        _ => {
+                            return Err(format!(
+                                "coefficients.json: categorical literature lever '{key}' must \
+                                 declare a centring reference level present in its levels — \
+                                 refusing this bundle"
+                            ));
+                        }
+                    }
+                }
+                "precomputed" => {}
+                other => {
+                    return Err(format!(
+                        "coefficients.json: literature lever '{key}' has unknown kind '{other}' — \
+                         refusing this bundle"
                     ));
                 }
-                _ => {}
             }
         }
         // Evidence is supplementary (powers the "Why?" citations); tolerate its absence.

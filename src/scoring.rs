@@ -158,8 +158,11 @@ pub fn design(p: &Profile, coefs: &Coefficients) -> HashMap<String, f64> {
     d.insert("diabetes".into(), b(p.diabetes));
     d.insert("high_bp".into(), b(p.high_bp));
     d.insert("respiratory".into(), b(p.respiratory));
-    // Ordinal 0/1/2 per the questionnaire; unanswered = none (the fitted β 0.320 finally fires — LEV-02).
-    d.insert("mobility".into(), p.mobility.unwrap_or(0) as f64);
+    // The questionnaire collects mobility as ordinal 0/1/2, but the coefficient was fitted on the
+    // BINARY any-difficulty encoding (harmonize.py: pfq_diff = PFQ061B > 1), so "some" and "a lot"
+    // both score 1 — scoring 2 would extrapolate to 2β, which the fit never estimated (PR#1 F1).
+    // An ordinal refit is a model task (Bundle 8).
+    d.insert("mobility".into(), p.mobility.map_or(0.0, |m| if m > 0 { 1.0 } else { 0.0 }));
     d.insert("cvd_hx".into(), b(p.cvd_hx));
     d.insert("cancer_hx".into(), b(p.cancer_hx));
     d.insert("education".into(), b(p.higher_educ));
@@ -226,6 +229,8 @@ pub fn literature_lp(p: &Profile, coefs: &Coefficients) -> f64 {
     }
     if let (Some(f), Some(level)) = (coefs.literature.get("alcohol"), p.alcohol.as_deref()) {
         if let Some(levels) = f.levels.as_ref() {
+            // The load gate guarantees: all ALCOHOL_LEVELS present, reference declared and present —
+            // so these lookups cannot silently misprice a level (PR#1 F3).
             let reference = f.reference.as_ref().and_then(|r| r.level.as_deref()).unwrap_or("none");
             lp += levels.get(level).copied().unwrap_or(0.0)
                 - levels.get(reference).copied().unwrap_or(0.0);
@@ -300,7 +305,7 @@ const FACTORS: &[(&str, &str)] = &[
 /// delta of removing that factor's contribution. Levers use the TOTAL-EFFECT (attribution)
 /// coefficients so they read honestly; manage/context factors (no attribution term) fall back to the
 /// fitted prediction coefficient. Main effects only — the `*_x_young` terms are excluded (EXP-01).
-/// Sorted by magnitude. `mobility` is listed but is always 0 in the v1 estimate design (see `design`).
+    // ("mobility" fires only when the caller supplies it; unanswered profiles score 0.)
 pub fn attributions(bundle: &Bundle, p: &Profile) -> Result<Vec<Attribution>, String> {
     p.validate()?;
     let (base_rr, base) = risk(bundle, p)?;
