@@ -75,13 +75,16 @@ def main():
     srv = subprocess.Popen(["./target/debug/clock-of-life-service"],
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
     try:
-        # wait for liveness
+        # wait for liveness. The sleep is in the loop body, not an except: get() reports HTTP
+        # errors as a status now, so a listening-but-degraded service (503 on the db ping) would
+        # otherwise spin through all 50 attempts in milliseconds.
         for _ in range(50):
             try:
                 if get("/health")[0] == 200:
                     break
             except Exception:
-                time.sleep(0.1)
+                pass
+            time.sleep(0.1)
         else:
             check("service starts", False, "never became healthy"); return finish()
 
@@ -97,26 +100,29 @@ def main():
               "waist": 115, "diabetes": True, "high_bp": True, "income": 1.0}
         _, e_healthy = post("/api/estimate", ro)
         _, e_high = post("/api/estimate", hi)
+        healthy_y, high_y = e_healthy.get("estimate_years"), e_high.get("estimate_years")
         check("estimate: healthy outlives high-risk by >10y",
-              e_healthy["estimate_years"] - e_high["estimate_years"] > 10,
-              f'{e_healthy["estimate_years"]} vs {e_high["estimate_years"]}')
+              bool(healthy_y and high_y and healthy_y - high_y > 10), f"{healthy_y} vs {high_y}")
+        healthy_rr, high_rr = e_healthy.get("relative_risk"), e_high.get("relative_risk")
         check("estimate: healthy RR < 1 < high-risk RR",
-              e_healthy["relative_risk"] < 1.0 < e_high["relative_risk"],
-              f'{e_healthy["relative_risk"]} / {e_high["relative_risk"]}')
+              bool(healthy_rr and high_rr and healthy_rr < 1.0 < high_rr),
+              f"{healthy_rr} / {high_rr}")
 
         smoker = {"country": "RO", "age": 45, "sex": "M", "smoke": 2, "pa_min": 100, "sleep": 7,
                   "waist": 108, "income": 2.0}
         _, quit = post("/api/whatif", {"base": smoker, "changes": {"smoke": 1}})
-        check("whatif: quitting smoking adds years", quit["delta_years"] > 0, f'+{quit["delta_years"]}')
+        check("whatif: quitting smoking adds years", quit.get("delta_years", 0) > 0,
+              f'+{quit.get("delta_years")}')
         check("whatif: cessation note present", "note" in quit)
         _, exercise = post("/api/whatif", {"base": smoker, "changes": {"pa_min": 2000}})
-        check("whatif: exercising adds years", exercise["delta_years"] > 0, f'+{exercise["delta_years"]}')
+        check("whatif: exercising adds years", exercise.get("delta_years", 0) > 0,
+              f'+{exercise.get("delta_years")}')
 
         # sanity: an average national resident ~ national life expectancy (meta assumption holds)
         avg = {"country": "RO", "age": 40, "sex": "M", "smoke": 0, "pa_min": 300, "sleep": 7, "waist": 98}
         _, e_avg = post("/api/estimate", avg)
         check("estimate: RO ~40yo male reaches a plausible age (72-90)",
-              72 <= e_avg["reaches_age"] <= 90, f'reaches {e_avg["reaches_age"]}')
+              72 <= e_avg.get("reaches_age", 0) <= 90, f'reaches {e_avg.get("reaches_age")}')
 
         # input validation -> 400
         s, _ = post("/api/estimate", {**ro, "pa_min": -5})
@@ -127,7 +133,7 @@ def main():
         plain = {"country": "RO", "age": 55, "sex": "M", "smoke": 0, "pa_min": 600,
                  "sleep": 7, "waist": 95}
         _, base_est = post("/api/estimate", plain)
-        base_years = base_est["estimate_years"]
+        base_years = base_est.get("estimate_years")
 
         # 1. Unanswered levers and answers at their centring reference are the same number.
         #    (The bundle's references: standardizer means for diet/sedentary/stress, level "light"
@@ -146,7 +152,8 @@ def main():
         # 2. Each lever moves the estimate in the direction the evidence says.
         def years(extra):
             _, e = post("/api/estimate", {**plain, **extra})
-            return e["estimate_years"]
+            # A failed estimate must fail the comparison, not abort the probe.
+            return e.get("estimate_years", float("nan"))
 
         # Query once and reuse: the number in the failure message must be the number that was
         # asserted, not a second request's answer (and each estimate persists a row).
@@ -166,7 +173,7 @@ def main():
         risky = {**plain, "alcohol": "heavy", "diet_score": 0, "sitting_hours": 12,
                  "stress_score": 14}
         _, risky_est = post("/api/estimate", risky)
-        why = {w["key"]: w for w in risky_est.get("why", [])}
+        why = {w.get("key"): w for w in risky_est.get("why", []) if isinstance(w, dict)}
         levers = ("alcohol", "diet", "sedentary", "stress")
         check("why[]: all four literature levers explain themselves",
               set(levers) <= set(why), ", ".join(sorted(why)))
@@ -195,7 +202,8 @@ def main():
 
         # 5. The advice targets them, with openable references — and never on an unanswered lever.
         _, recs = post("/api/recommendations", risky)
-        by_feature = {r["feature"]: r for r in recs} if isinstance(recs, list) else {}
+        by_feature = {r.get("feature"): r for r in recs
+                      if isinstance(r, dict)} if isinstance(recs, list) else {}
         check("recommendations: all four levers are actionable advice",
               set(levers) <= set(by_feature), ", ".join(sorted(by_feature)))
         check("recommendations: each carries at least one openable study",
@@ -203,7 +211,8 @@ def main():
         # The unanswered-lever check needs a profile that DOES fire something, otherwise an empty
         # response (dead rules table, eval_condition stuck false) would pass it trivially.
         _, no_levers = post("/api/recommendations", {**plain, "smoke": 2, "waist": 105})
-        fired = {r["feature"] for r in no_levers} if isinstance(no_levers, list) else set()
+        fired = {r.get("feature") for r in no_levers
+                 if isinstance(r, dict)} if isinstance(no_levers, list) else set()
         check("recommendations: the engine is live for this profile (non-lever rules fire)",
               bool(fired & {"smk_current", "waist"}), ", ".join(sorted(fired)))
         check("recommendations: an unanswered lever is never recommended",
@@ -227,7 +236,8 @@ def main():
               s == 200 and saved.get("saved") == len(answers), str(saved))
         # The second run is the witness: read the state back, not just write it.
         s, back = get_auth("/api/answers", token)
-        stored = {a["question_code"]: a["value"] for a in back} if s == 200 else {}
+        stored = ({a.get("question_code"): a.get("value") for a in back if isinstance(a, dict)}
+                  if s == 200 and isinstance(back, list) else {})
         check("interview: answers read back identically (batteries stay arrays)",
               stored.get("Q19_stress") == [3, 1, 1, 3] and stored.get("Q20_mood") == [1, 0],
               str(stored.get("Q19_stress")))
@@ -239,9 +249,11 @@ def main():
         check("interview: the home location reads back on the profile",
               bool(s == 200 and profile.get("home_location_id")), str(s))
 
-        # Probe hygiene: erase the account we created, so repeated runs don't accrete rows. This
-        # also witnesses the GDPR erasure route and the "a token for an erased account reads as
-        # unauthenticated" guard — nothing else here covers either.
+        # Probe hygiene: erase the account we created, so runs don't accrete *accounts*. (The
+        # unauthenticated estimates above still persist calculation rows to the shared anonymous
+        # account — inherent to exercising the try-before-signup path.) This also witnesses the
+        # GDPR erasure route and the "a token for an erased account reads as unauthenticated"
+        # guard — nothing else here covers either.
         s, _ = get_auth("/api/account", token, method="DELETE")
         check("privacy: the probe's account erases itself (GDPR route)", s == 200, str(s))
         s, _ = get_auth("/api/profile", token)
