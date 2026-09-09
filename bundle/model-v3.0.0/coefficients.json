@@ -1,45 +1,71 @@
 {
   "prediction": {
-    "smk_former": 0.1659515664340642,
-    "smk_current": 0.19389201812107032,
-    "cigs_day": 0.09408256472845007,
-    "activity": -0.23034158461150214,
-    "sleep_long": 0.3218797128476774,
+    "smk_former": 0.16585261062097334,
+    "smk_current": 0.1941271511872724,
+    "cigs_day": 0.09382652249021937,
+    "activity": -0.23010970825535842,
+    "sleep_long": 0.32219065703908645,
     "waist": 0.0,
-    "sbp": 0.08589127267702017,
-    "diabetes": 0.14302141370599375,
-    "high_bp": 0.19043379073475528,
-    "respiratory": 0.3097842558794932,
-    "mobility": 0.4467293528316219,
-    "cvd_hx": 0.4678869922368941,
-    "cancer_hx": 0.38763971163882077,
+    "sbp": 0.08563588579241514,
+    "diabetes": 0.14251193384610883,
+    "high_bp": 0.19135419055034852,
+    "respiratory": 0.30918984743701305,
+    "mobility": 0.4472467498662883,
+    "cvd_hx": 0.46755225966306885,
+    "cancer_hx": 0.38811290564644974,
     "education": 0.0,
-    "income": -0.18969383387448704,
-    "smk_current_x_young": 0.3540121608310617,
-    "activity_x_young": 0.14255820760858723,
-    "waist_x_young": 0.08179399828387934
+    "income": -0.18977036653371634,
+    "smk_current_x_young": 0.3535502094279559,
+    "activity_x_young": 0.14182499218461458,
+    "waist_x_young": 0.08194260827932967
   },
   "total_effect": {
-    "smk_former": 0.1262987326468818,
-    "smk_current": 0.5439531113767782,
-    "cigs_day": 0.16212907555521705,
-    "activity": -0.27340783306549316,
-    "waist": 0.03063271246249437
+    "smk_former": 0.12631969343787625,
+    "smk_current": 0.5436134710766533,
+    "cigs_day": 0.16966314613159889,
+    "activity": -0.2751631255146609,
+    "waist": 0.010848603808008596
   },
   "total_effect_sd": {
-    "smk_former": 0.0425105621194833,
-    "smk_current": 0.05187172975365166,
-    "cigs_day": 0.016672190678776417,
-    "activity": 0.02056146733961046,
-    "waist": 0.023455142595327508
+    "smk_former": 0.042512032350678346,
+    "smk_current": 0.05187189172221865,
+    "cigs_day": 0.017689143078874404,
+    "activity": 0.021883461111674492,
+    "waist": 0.024541490194037046
   },
   "total_effect_source": {
     "smk_former": "prior_blended",
     "smk_current": "prior_blended",
-    "cigs_day": "prior_blended",
-    "activity": "prior_blended",
-    "waist": "prior_blended"
+    "cigs_day": "data_only_units_mismatch",
+    "activity": "data_only_units_mismatch",
+    "waist": "data_only_units_mismatch"
   },
+  "total_effect_data_only": {
+    "smk_former": {
+      "mean": 0.09683051462342802,
+      "se": 0.04696751935815869
+    },
+    "smk_current": {
+      "mean": 0.4829809014896452,
+      "se": 0.05528263129209898
+    },
+    "cigs_day": {
+      "mean": 0.16966314613159889,
+      "se": 0.017689143078874404
+    },
+    "activity": {
+      "mean": -0.2751631255146609,
+      "se": 0.021883461111674492
+    },
+    "waist": {
+      "mean": 0.010848603808008596,
+      "se": 0.024541490194037046
+    }
+  },
+  "clipped_at_bound": [
+    "waist",
+    "education"
+  ],
   "adjustment_sets": {
     "smk_former": [
       "education",
@@ -75,15 +101,15 @@
       200
     ],
     "by_sex": true,
-    "rationale": "min 66 deaths/stratum; net young-smoking -0.547 -> +0.542; within-stratum C 0.666 -> 0.688",
+    "rationale": "4 age bands x sex. Chosen on measured deaths per stratum (min 66) and on the sign of the young-smoking term, which is negative unstratified and positive under every candidate split. The exact figures are asserted by tests/test_golden.py rather than restated here.",
     "measured": "2026-09-09"
   },
   "attribution": {
-    "smk_former": 0.1262987326468818,
-    "smk_current": 0.5439531113767782,
-    "cigs_day": 0.16212907555521705,
-    "activity": -0.27340783306549316,
-    "waist": 0.03063271246249437
+    "smk_former": 0.12631969343787625,
+    "smk_current": 0.5436134710766533,
+    "cigs_day": 0.16966314613159889,
+    "activity": -0.2751631255146609,
+    "waist": 0.010848603808008596
   },
   "standardizer": {
     "activity": {

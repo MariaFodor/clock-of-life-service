@@ -21,7 +21,7 @@
   },
   "education": {
     "role": "context",
-    "grade": "na",
+    "grade": "moderate",
     "citation": "Socioeconomic Inequalities in Health in 22 European Countries",
     "doi": "10.1056/NEJMsa0707519",
     "url": "https://doi.org/10.1056/NEJMsa0707519",
@@ -31,7 +31,7 @@
   },
   "income": {
     "role": "context",
-    "grade": "na",
+    "grade": "moderate",
     "citation": "Socioeconomic Inequalities in Health in 22 European Countries",
     "doi": "10.1056/NEJMsa0707519",
     "url": "https://doi.org/10.1056/NEJMsa0707519",
@@ -121,7 +121,7 @@
   },
   "alcohol": {
     "role": "lever",
-    "grade": "strong",
+    "grade": "strong_for_harm",
     "citation": "Alcohol use and burden for 195 countries and territories, 1990-2016",
     "doi": "10.1016/S0140-6736(18)31310-2",
     "url": "https://doi.org/10.1016/S0140-6736(18)31310-2",

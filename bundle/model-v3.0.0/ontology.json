@@ -26,7 +26,7 @@
         200
       ],
       "by_sex": true,
-      "rationale": "min 66 deaths/stratum; net young-smoking -0.547 -> +0.542; within-stratum C 0.666 -> 0.688",
+      "rationale": "4 age bands x sex. Chosen on measured deaths per stratum (min 66) and on the sign of the young-smoking term, which is negative unstratified and positive under every candidate split. The exact figures are asserted by tests/test_golden.py rather than restated here.",
       "measured": "2026-09-09"
     },
     "citations_verified_against": "https://api.crossref.org/works/{doi}",
@@ -99,8 +99,12 @@
       "title": "Socioeconomic Inequalities in Health in 22 European Countries",
       "first_author": "Mackenbach",
       "year": 2008,
-      "verified": "2026-09-09"
-    }
+      "verified": "2026-09-09",
+      "per": "binary"
+    },
+    "grade": "moderate",
+    "clip_expected": true,
+    "clip_reason": "Education's own effect is not detectable in this cohort once the fit is stratified by age and sex (+0.006 unconstrained, i.e. noise pointing the wrong way). The constraint holds it at 0 rather than letting noise read as 'school shortens your life'; it simply drops out of the breakdown."
   },
   "income": {
     "role": "context",
@@ -128,8 +132,10 @@
       "title": "Socioeconomic Inequalities in Health in 22 European Countries",
       "first_author": "Mackenbach",
       "year": 2008,
-      "verified": "2026-09-09"
-    }
+      "verified": "2026-09-09",
+      "per": "per_category"
+    },
+    "grade": "moderate"
   },
   "smk_former": {
     "role": "lever",
@@ -158,7 +164,8 @@
       "title": "Mortality in relation to smoking: 50 years' observations on male British doctors",
       "first_author": "Doll",
       "year": 2004,
-      "verified": "2026-09-09"
+      "verified": "2026-09-09",
+      "per": "binary"
     },
     "study": "smoking-doll-peto",
     "grade": "strong"
@@ -191,11 +198,16 @@
       "title": "21st-Century Hazards of Smoking and Benefits of Cessation in the United States",
       "first_author": "Jha",
       "year": 2013,
-      "verified": "2026-09-09"
+      "verified": "2026-09-09",
+      "per": "binary"
     },
     "study": "smoking-cessation",
     "grade": "strong",
-    "note": "Quitting: the former-smoker coefficient carries sick-quitter bias, so What-If models cessation as trending to never-smoker (the causal target)."
+    "note": "Quitting: the former-smoker coefficient carries sick-quitter bias, so What-If models cessation as trending to never-smoker (the causal target).",
+    "waived_confounders": [
+      "stress"
+    ],
+    "waiver_reason": "Perceived stress is a literature feature with no cohort measurement, so it cannot be adjusted for. Residual confounding by stress would, if anything, inflate the smoking coefficient."
   },
   "cigs_day": {
     "role": "lever",
@@ -223,7 +235,8 @@
       "title": "Mortality in relation to smoking: 50 years' observations on male British doctors",
       "first_author": "Doll",
       "year": 2004,
-      "verified": "2026-09-09"
+      "verified": "2026-09-09",
+      "per": "per_cigarette_day"
     },
     "study": "smoking-doll-peto",
     "grade": "strong"
@@ -258,7 +271,8 @@
       "title": "Leisure Time Physical Activity and Mortality",
       "first_author": "Arem",
       "year": 2015,
-      "verified": "2026-09-09"
+      "verified": "2026-09-09",
+      "per": "per_category"
     },
     "study": "activity-arem",
     "grade": "strong",
@@ -290,7 +304,8 @@
       "title": "Daily Sitting Time and All-Cause Mortality: A Meta-Analysis",
       "first_author": "Chau",
       "year": 2013,
-      "verified": "2026-09-09"
+      "verified": "2026-09-09",
+      "per": "per_hour"
     },
     "standardizer": {
       "mean": 6.0,
@@ -365,12 +380,21 @@
       "title": "Central fatness and risk of all cause mortality: systematic review and dose-response meta-analysis",
       "first_author": "Jayedi",
       "year": 2020,
-      "verified": "2026-09-09"
+      "verified": "2026-09-09",
+      "per": "per_10cm"
     },
     "study": "waist-mortality",
     "grade": "strong",
     "assumption": "waist -> mobility taken as the dominant direction of a feedback loop.",
-    "note": "smoking -> waist is NEGATIVE (nicotine suppresses appetite), which is why smoking is a CONFOUNDER of the waist-mortality effect and must be adjusted for."
+    "note": "smoking -> waist is NEGATIVE (nicotine suppresses appetite), which is why smoking is a CONFOUNDER of the waist-mortality effect and must be adjusted for.",
+    "waived_confounders": [
+      "diet",
+      "alcohol",
+      "sedentary"
+    ],
+    "waiver_reason": "Diet, alcohol and sitting time are literature features: NHANES carries no usable item-level batteries for them, so they cannot enter a cohort-fitted adjustment set. The waist total effect is therefore adjusted for age, sex, smoking, activity and SES but NOT for these three. Recorded so the estimate is read as partially adjusted rather than fully causal.",
+    "clip_expected": true,
+    "clip_reason": "In the PREDICTION model \u2014 which conditions on diabetes, blood pressure and mobility, the very paths adiposity acts through \u2014 the direct effect of waist is slightly negative (-0.134). We do not believe adiposity protects anyone, and refuse to show a number that says so, so the sign constraint holds it at 0: waist does not move the headline estimate, while its TOTAL effect (+0.011 from the cohort) is what What-If and the recommendations use. Owner decision, ONT-01 Q3."
   },
   "diet": {
     "role": "lever",
@@ -402,7 +426,8 @@
       "title": "Adherence to a Mediterranean Diet and Survival in a Greek Population",
       "first_author": "Trichopoulou",
       "year": 2003,
-      "verified": "2026-09-09"
+      "verified": "2026-09-09",
+      "per": "per_sd_of_published_score"
     },
     "standardizer": {
       "mean": 2.5,
@@ -447,7 +472,7 @@
       "verified": "2026-09-09"
     },
     "study": "alcohol-gbd",
-    "grade": "strong",
+    "grade": "strong_for_harm",
     "note": "Monotone non-decreasing by construction: no safe level, no protective dip (the J-curve is a selection artifact)."
   },
   "stress": {
@@ -475,7 +500,8 @@
       "title": "A Global Measure of Perceived Stress",
       "first_author": "Cohen",
       "year": 1983,
-      "verified": "2026-09-09"
+      "verified": "2026-09-09",
+      "per": "per_sd_of_published_score"
     },
     "standardizer": {
       "mean": 6.11,
@@ -513,7 +539,8 @@
       "title": "Age-specific relevance of usual blood pressure to vascular mortality",
       "first_author": "Prospective Studies Collaboration",
       "year": 2002,
-      "verified": "2026-09-09"
+      "verified": "2026-09-09",
+      "per": "per_20mmHg"
     }
   },
   "diabetes": {
@@ -545,7 +572,8 @@
       "title": "Diabetes Mellitus, Fasting Glucose, and Risk of Cause-Specific Death",
       "first_author": "Emerging Risk Factors Collaboration",
       "year": 2011,
-      "verified": "2026-09-09"
+      "verified": "2026-09-09",
+      "per": "binary"
     },
     "study": "diabetes-mortality",
     "grade": "strong"
@@ -575,7 +603,8 @@
       "title": "Age-specific relevance of usual blood pressure to vascular mortality",
       "first_author": "Prospective Studies Collaboration",
       "year": 2002,
-      "verified": "2026-09-09"
+      "verified": "2026-09-09",
+      "per": "binary"
     }
   },
   "respiratory": {
@@ -603,7 +632,8 @@
       "title": "Global burden of COPD: systematic review and meta-analysis",
       "first_author": "Halbert",
       "year": 2006,
-      "verified": "2026-09-09"
+      "verified": "2026-09-09",
+      "per": "binary"
     }
   },
   "mobility": {
@@ -632,8 +662,10 @@
       "title": "Gait Speed and Survival in Older Adults",
       "first_author": "Studenski",
       "year": 2011,
-      "verified": "2026-09-09"
-    }
+      "verified": "2026-09-09",
+      "per": "binary"
+    },
+    "decision": "Classified as MARKER, not context: difficulty walking is downstream evidence of accumulated damage rather than a cause of death, so it predicts and explains but is never recommended or offered in What-If."
   },
   "cvd_hx": {
     "role": "context",
@@ -661,7 +693,8 @@
       "title": "Association of Cardiometabolic Multimorbidity With Mortality",
       "first_author": "Di Angelantonio",
       "year": 2015,
-      "verified": "2026-09-09"
+      "verified": "2026-09-09",
+      "per": "binary"
     }
   },
   "cancer_hx": {
@@ -688,7 +721,8 @@
       "title": "Cancer treatment and survivorship statistics, 2019",
       "first_author": "Miller",
       "year": 2019,
-      "verified": "2026-09-09"
+      "verified": "2026-09-09",
+      "per": "binary"
     }
   },
   "env": {
