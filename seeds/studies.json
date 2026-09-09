@@ -1,46 +1,240 @@
 {
-  "studies": [
-    {"code": "evidence-grades-and-alcohol", "title": "Evidence grades for the kept factors + alcohol encoding", "authors": "The Clock of Life (RES-02 review)", "year": 2026, "venue": "internal evidence review", "doi": null, "url": null, "review_slug": "evidence-grades-and-alcohol", "evidence_grade": "strong"},
-    {"code": "instruments-scoring-formulas", "title": "Scoring instruments & formulas (IPAQ MET, Mediterranean diet score, sitting time, PSS)", "authors": "The Clock of Life (RES-03 review)", "year": 2026, "venue": "internal evidence review", "doi": null, "url": null, "review_slug": "instruments-scoring-formulas", "evidence_grade": "strong"},
-    {"code": "environment-location-mapping", "title": "Environment / location → longevity mapping (PM2.5, greenspace)", "authors": "The Clock of Life (RES-04 review)", "year": 2026, "venue": "internal evidence review", "doi": null, "url": null, "review_slug": "environment-location-mapping", "evidence_grade": "moderate"},
-    {"code": "cox-1972-proportional-hazards", "title": "Regression Models and Life-Tables", "authors": "Cox, D. R.", "year": 1972, "venue": "J. R. Stat. Soc. B 34(2):187–220", "doi": "10.1111/j.2517-6161.1972.tb00899.x", "url": "https://doi.org/10.1111/j.2517-6161.1972.tb00899.x", "review_slug": "cox-1972-proportional-hazards", "evidence_grade": "na"},
-    {"code": "kaplan-meier-1958-product-limit", "title": "Nonparametric Estimation from Incomplete Observations", "authors": "Kaplan, E. L. & Meier, P.", "year": 1958, "venue": "J. Am. Stat. Assoc. 53(282):457–481", "doi": "10.1080/01621459.1958.10501452", "url": "https://doi.org/10.1080/01621459.1958.10501452", "review_slug": "kaplan-meier-1958-product-limit", "evidence_grade": "na"},
-    {"code": "royston-parmar-2002-flexible-parametric", "title": "Flexible Parametric Proportional-Hazards and Proportional-Odds Models for Censored Survival Data", "authors": "Royston, P. & Parmar, M. K. B.", "year": 2002, "venue": "Stat. Med. 21(15):2175–2197", "doi": "10.1002/sim.1203", "url": "https://doi.org/10.1002/sim.1203", "review_slug": "royston-parmar-2002-flexible-parametric", "evidence_grade": "na"},
-    {"code": "royston-parmar-2013-rmst", "title": "Restricted Mean Survival Time: an Alternative to the Hazard Ratio", "authors": "Royston, P. & Parmar, M. K. B.", "year": 2013, "venue": "BMC Med. Res. Methodol. 13:152", "doi": "10.1186/1471-2288-13-152", "url": "https://doi.org/10.1186/1471-2288-13-152", "review_slug": "royston-parmar-2013-rmst", "evidence_grade": "na"},
-    {"code": "harrell-1996-prognostic-models", "title": "Multivariable Prognostic Models: Developing Models, Evaluating Assumptions and Adequacy, and Measuring and Reducing Errors", "authors": "Harrell, F. E. Jr., Lee, K. L. & Mark, D. B.", "year": 1996, "venue": "Stat. Med. 15(4):361–387", "doi": "10.1002/(SICI)1097-0258(19960229)15:4<361::AID-SIM168>3.0.CO;2-4", "url": "https://doi.org/10.1002/(SICI)1097-0258(19960229)15:4<361::AID-SIM168>3.0.CO;2-4", "review_slug": "harrell-1996-prognostic-models", "evidence_grade": "na"}
-  ],
-  "feature_studies": [
-    {"feature_key": "smk_former",  "study_code": "evidence-grades-and-alcohol"},
-    {"feature_key": "smk_current", "study_code": "evidence-grades-and-alcohol"},
-    {"feature_key": "activity",    "study_code": "evidence-grades-and-alcohol"},
-    {"feature_key": "activity",    "study_code": "instruments-scoring-formulas"},
-    {"feature_key": "sleep_long",  "study_code": "evidence-grades-and-alcohol"},
-    {"feature_key": "waist",       "study_code": "evidence-grades-and-alcohol"},
-    {"feature_key": "diabetes",    "study_code": "evidence-grades-and-alcohol"},
-    {"feature_key": "high_bp",     "study_code": "evidence-grades-and-alcohol"},
-    {"feature_key": "respiratory", "study_code": "evidence-grades-and-alcohol"},
-    {"feature_key": "mobility",    "study_code": "evidence-grades-and-alcohol"},
-    {"feature_key": "cvd_hx",      "study_code": "evidence-grades-and-alcohol"},
-    {"feature_key": "cancer_hx",   "study_code": "evidence-grades-and-alcohol"},
-    {"feature_key": "education",   "study_code": "evidence-grades-and-alcohol"},
-    {"feature_key": "income",      "study_code": "evidence-grades-and-alcohol"},
-    {"feature_key": "diet",        "study_code": "evidence-grades-and-alcohol"},
-    {"feature_key": "diet",        "study_code": "instruments-scoring-formulas"},
-    {"feature_key": "sedentary",   "study_code": "evidence-grades-and-alcohol"},
-    {"feature_key": "sedentary",   "study_code": "instruments-scoring-formulas"},
-    {"feature_key": "stress",      "study_code": "evidence-grades-and-alcohol"},
-    {"feature_key": "stress",      "study_code": "instruments-scoring-formulas"},
-    {"feature_key": "alcohol",     "study_code": "evidence-grades-and-alcohol"},
-    {"feature_key": "env",         "study_code": "environment-location-mapping"}
-  ],
-  "rule_studies": [
-    {"rule_code": "quit_smoking",        "study_code": "evidence-grades-and-alcohol"},
-    {"rule_code": "increase_activity",   "study_code": "evidence-grades-and-alcohol"},
-    {"rule_code": "increase_activity",   "study_code": "instruments-scoring-formulas"},
-    {"rule_code": "manage_hypertension", "study_code": "evidence-grades-and-alcohol"},
-    {"rule_code": "manage_diabetes",     "study_code": "evidence-grades-and-alcohol"},
-    {"rule_code": "reduce_waist",        "study_code": "evidence-grades-and-alcohol"},
-    {"rule_code": "manage_respiratory",  "study_code": "evidence-grades-and-alcohol"},
-    {"rule_code": "review_long_sleep",   "study_code": "evidence-grades-and-alcohol"}
-  ]
+ "studies": [
+  {
+   "code": "evidence-grades-and-alcohol",
+   "title": "Evidence grades for the kept factors + alcohol encoding",
+   "authors": "The Clock of Life (RES-02 review)",
+   "year": 2026,
+   "venue": "internal evidence review",
+   "doi": null,
+   "url": null,
+   "review_slug": "evidence-grades-and-alcohol",
+   "evidence_grade": "strong"
+  },
+  {
+   "code": "instruments-scoring-formulas",
+   "title": "Scoring instruments & formulas (IPAQ MET, Mediterranean diet score, sitting time, PSS)",
+   "authors": "The Clock of Life (RES-03 review)",
+   "year": 2026,
+   "venue": "internal evidence review",
+   "doi": null,
+   "url": null,
+   "review_slug": "instruments-scoring-formulas",
+   "evidence_grade": "strong"
+  },
+  {
+   "code": "environment-location-mapping",
+   "title": "Environment / location \u2192 longevity mapping (PM2.5, greenspace)",
+   "authors": "The Clock of Life (RES-04 review)",
+   "year": 2026,
+   "venue": "internal evidence review",
+   "doi": null,
+   "url": null,
+   "review_slug": "environment-location-mapping",
+   "evidence_grade": "moderate"
+  },
+  {
+   "code": "cox-1972-proportional-hazards",
+   "title": "Regression Models and Life-Tables",
+   "authors": "Cox, D. R.",
+   "year": 1972,
+   "venue": "J. R. Stat. Soc. B 34(2):187\u2013220",
+   "doi": "10.1111/j.2517-6161.1972.tb00899.x",
+   "url": "https://doi.org/10.1111/j.2517-6161.1972.tb00899.x",
+   "review_slug": "cox-1972-proportional-hazards",
+   "evidence_grade": "na"
+  },
+  {
+   "code": "kaplan-meier-1958-product-limit",
+   "title": "Nonparametric Estimation from Incomplete Observations",
+   "authors": "Kaplan, E. L. & Meier, P.",
+   "year": 1958,
+   "venue": "J. Am. Stat. Assoc. 53(282):457\u2013481",
+   "doi": "10.1080/01621459.1958.10501452",
+   "url": "https://doi.org/10.1080/01621459.1958.10501452",
+   "review_slug": "kaplan-meier-1958-product-limit",
+   "evidence_grade": "na"
+  },
+  {
+   "code": "royston-parmar-2002-flexible-parametric",
+   "title": "Flexible Parametric Proportional-Hazards and Proportional-Odds Models for Censored Survival Data",
+   "authors": "Royston, P. & Parmar, M. K. B.",
+   "year": 2002,
+   "venue": "Stat. Med. 21(15):2175\u20132197",
+   "doi": "10.1002/sim.1203",
+   "url": "https://doi.org/10.1002/sim.1203",
+   "review_slug": "royston-parmar-2002-flexible-parametric",
+   "evidence_grade": "na"
+  },
+  {
+   "code": "royston-parmar-2013-rmst",
+   "title": "Restricted Mean Survival Time: an Alternative to the Hazard Ratio",
+   "authors": "Royston, P. & Parmar, M. K. B.",
+   "year": 2013,
+   "venue": "BMC Med. Res. Methodol. 13:152",
+   "doi": "10.1186/1471-2288-13-152",
+   "url": "https://doi.org/10.1186/1471-2288-13-152",
+   "review_slug": "royston-parmar-2013-rmst",
+   "evidence_grade": "na"
+  },
+  {
+   "code": "harrell-1996-prognostic-models",
+   "title": "Multivariable Prognostic Models: Developing Models, Evaluating Assumptions and Adequacy, and Measuring and Reducing Errors",
+   "authors": "Harrell, F. E. Jr., Lee, K. L. & Mark, D. B.",
+   "year": 1996,
+   "venue": "Stat. Med. 15(4):361\u2013387",
+   "doi": "10.1002/(SICI)1097-0258(19960229)15:4<361::AID-SIM168>3.0.CO;2-4",
+   "url": "https://doi.org/10.1002/(SICI)1097-0258(19960229)15:4<361::AID-SIM168>3.0.CO;2-4",
+   "review_slug": "harrell-1996-prognostic-models",
+   "evidence_grade": "na"
+  }
+ ],
+ "feature_studies": [
+  {
+   "feature_key": "smk_former",
+   "study_code": "evidence-grades-and-alcohol"
+  },
+  {
+   "feature_key": "smk_current",
+   "study_code": "evidence-grades-and-alcohol"
+  },
+  {
+   "feature_key": "activity",
+   "study_code": "evidence-grades-and-alcohol"
+  },
+  {
+   "feature_key": "activity",
+   "study_code": "instruments-scoring-formulas"
+  },
+  {
+   "feature_key": "sleep_long",
+   "study_code": "evidence-grades-and-alcohol"
+  },
+  {
+   "feature_key": "waist",
+   "study_code": "evidence-grades-and-alcohol"
+  },
+  {
+   "feature_key": "diabetes",
+   "study_code": "evidence-grades-and-alcohol"
+  },
+  {
+   "feature_key": "high_bp",
+   "study_code": "evidence-grades-and-alcohol"
+  },
+  {
+   "feature_key": "respiratory",
+   "study_code": "evidence-grades-and-alcohol"
+  },
+  {
+   "feature_key": "mobility",
+   "study_code": "evidence-grades-and-alcohol"
+  },
+  {
+   "feature_key": "cvd_hx",
+   "study_code": "evidence-grades-and-alcohol"
+  },
+  {
+   "feature_key": "cancer_hx",
+   "study_code": "evidence-grades-and-alcohol"
+  },
+  {
+   "feature_key": "education",
+   "study_code": "evidence-grades-and-alcohol"
+  },
+  {
+   "feature_key": "income",
+   "study_code": "evidence-grades-and-alcohol"
+  },
+  {
+   "feature_key": "diet",
+   "study_code": "evidence-grades-and-alcohol"
+  },
+  {
+   "feature_key": "diet",
+   "study_code": "instruments-scoring-formulas"
+  },
+  {
+   "feature_key": "sedentary",
+   "study_code": "evidence-grades-and-alcohol"
+  },
+  {
+   "feature_key": "sedentary",
+   "study_code": "instruments-scoring-formulas"
+  },
+  {
+   "feature_key": "stress",
+   "study_code": "evidence-grades-and-alcohol"
+  },
+  {
+   "feature_key": "stress",
+   "study_code": "instruments-scoring-formulas"
+  },
+  {
+   "feature_key": "alcohol",
+   "study_code": "evidence-grades-and-alcohol"
+  },
+  {
+   "feature_key": "env",
+   "study_code": "environment-location-mapping"
+  }
+ ],
+ "rule_studies": [
+  {
+   "rule_code": "quit_smoking",
+   "study_code": "evidence-grades-and-alcohol"
+  },
+  {
+   "rule_code": "increase_activity",
+   "study_code": "evidence-grades-and-alcohol"
+  },
+  {
+   "rule_code": "increase_activity",
+   "study_code": "instruments-scoring-formulas"
+  },
+  {
+   "rule_code": "manage_hypertension",
+   "study_code": "evidence-grades-and-alcohol"
+  },
+  {
+   "rule_code": "manage_diabetes",
+   "study_code": "evidence-grades-and-alcohol"
+  },
+  {
+   "rule_code": "reduce_waist",
+   "study_code": "evidence-grades-and-alcohol"
+  },
+  {
+   "rule_code": "manage_respiratory",
+   "study_code": "evidence-grades-and-alcohol"
+  },
+  {
+   "rule_code": "review_long_sleep",
+   "study_code": "evidence-grades-and-alcohol"
+  },
+  {
+   "rule_code": "reduce_alcohol",
+   "study_code": "evidence-grades-and-alcohol"
+  },
+  {
+   "rule_code": "improve_diet",
+   "study_code": "evidence-grades-and-alcohol"
+  },
+  {
+   "rule_code": "improve_diet",
+   "study_code": "instruments-scoring-formulas"
+  },
+  {
+   "rule_code": "reduce_sitting",
+   "study_code": "evidence-grades-and-alcohol"
+  },
+  {
+   "rule_code": "reduce_sitting",
+   "study_code": "instruments-scoring-formulas"
+  },
+  {
+   "rule_code": "manage_stress",
+   "study_code": "instruments-scoring-formulas"
+  }
+ ]
 }
