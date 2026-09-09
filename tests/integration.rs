@@ -1202,8 +1202,62 @@ fn incompatible_bundle_refused_at_load() {
     assert!(err.contains("never emits"), "got: {err}");
 }
 
+/// The unsurfaced-lever gate, on the REAL ontology. The variants above write no ontology.json, so
+/// `ontology` is Null there and this arm is skipped entirely — the gate shipped with no test at all,
+/// which is how the bug it guards against (cigs_day: a lever with a total effect that why[] never
+/// showed) got in. Both directions are checked: the shipped bundle must load, and a lever the build
+/// cannot explain must be refused.
+#[test]
+fn unsurfaced_lever_refused_at_load() {
+    let coefs = std::fs::read_to_string("bundle/model-v3.0.1/coefficients.json").unwrap();
+    let good_coefs: serde_json::Value = serde_json::from_str(&coefs).unwrap();
+    let good_ont: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string("bundle/model-v3.0.1/ontology.json").unwrap(),
+    )
+    .unwrap();
+
+    let load_with = |coefs: &serde_json::Value, ont: &serde_json::Value, tag: &str| {
+        let dir = std::env::temp_dir().join(format!("clock-unsurfaced-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("manifest.json"),
+            serde_json::json!({"version": "0.0.0-test", "algorithm": "cox_ph",
+                               "countries": [], "checksums": {}})
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(dir.join("coefficients.json"), coefs.to_string()).unwrap();
+        std::fs::write(dir.join("ontology.json"), ont.to_string()).unwrap();
+        let res = clock_of_life_service::bundle::Bundle::load(&dir);
+        std::fs::remove_dir_all(&dir).ok();
+        res
+    };
+
+    // The shipped ontology names 22 factors; every lever among them with a total effect must be one
+    // this build surfaces. If this ever fails, the bundle is unshippable, not the test wrong.
+    load_with(&good_coefs, &good_ont, "real")
+        .unwrap_or_else(|e| panic!("the shipped v3.0.1 bundle must load: {e}"));
+
+    // A lever this build has no label, no attribution and no ranking slot for.
+    let mut ont = good_ont.clone();
+    ont["screen_time"] = serde_json::json!({"role": "lever", "sign": "positive"});
+    let mut coefs = good_coefs.clone();
+    coefs["total_effect"]["screen_time"] = serde_json::json!(0.11);
+    let err = load_with(&coefs, &ont, "fake-lever").err().expect("must be refused");
+    assert!(err.contains("screen_time") && err.contains("never surfaces"), "got: {err}");
+
+    // The gate keys on BOTH conditions, so neither half fires alone: a lever the fit never gave a
+    // total effect has nothing to drop, and a non-lever role is not a recommendation surface.
+    load_with(&good_coefs, &ont, "lever-no-effect")
+        .unwrap_or_else(|e| panic!("a lever without a total effect must load: {e}"));
+    let mut ont_marker = good_ont.clone();
+    ont_marker["screen_time"] = serde_json::json!({"role": "marker", "sign": "positive"});
+    load_with(&coefs, &ont_marker, "non-lever")
+        .unwrap_or_else(|e| panic!("a non-lever with a total effect must load: {e}"));
+}
+
 /// PR#1 F4: the remaining literature-gate arms, on synthetic bundles. Each variant patches the good
-/// v3.0.0 coefficients and must be refused with a message naming the reason.
+/// v3.0.1 coefficients and must be refused with a message naming the reason.
 #[test]
 fn literature_gate_refuses_each_malformed_variant() {
     let good: serde_json::Value = serde_json::from_str(

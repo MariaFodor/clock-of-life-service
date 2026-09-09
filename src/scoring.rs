@@ -324,14 +324,14 @@ pub struct Attribution {
     pub year: Option<i32>,
 }
 
-/// The design keys this build can explain in why[]. `Bundle::load` refuses a bundle whose ontology
-/// declares a lever with a total effect that is absent from here — otherwise its contribution is
-/// dropped from the breakdown and the ranking without anyone noticing.
-pub const FACTOR_KEYS: &[&str] = &[
-    "smk_former", "smk_current", "cigs_day", "activity", "sleep_long", "waist", "diabetes",
-    "high_bp", "respiratory", "mobility", "cvd_hx", "cancer_hx", "education", "income",
-    "diet", "alcohol", "sedentary", "stress",
-];
+/// Every design key this build can explain in why[] — derived from the two tables `attributions()`
+/// actually walks, never hand-copied. `Bundle::load` refuses a bundle whose ontology declares a
+/// lever with a total effect that is absent from here, so a second list would fail in the one
+/// direction that matters: a key listed here but missing from the tables passes the gate and
+/// silently reopens exactly the cigs_day bug the gate exists to prevent.
+pub fn surfaced_keys() -> impl Iterator<Item = &'static str> {
+    FACTORS.iter().chain(LIT_LABELS.iter()).map(|(k, _)| *k)
+}
 
 /// Main-effect design keys (age-interaction `*_x_young` terms excluded) with user-facing labels.
 /// `mobility` fires only when the caller supplies it; unanswered profiles score 0.
@@ -342,6 +342,16 @@ const FACTORS: &[(&str, &str)] = &[
     // cigs_day out of here dropped over a year of harm from why[] and from the ranking, while
     // What-If priced it. That produced a visible contradiction: "quit smoking" read +4.7 years in
     // What-If and -3.0 in the breakdown for the same person.
+    //
+    // why[] and the recommendation now agree exactly (-3.0 + -1.2 = -4.2 = impact_years). What-If
+    // still reads +4.7 on that profile, and the ~0.5-year remainder is two effects, not a
+    // disagreement: about 0.13 of it is that removing both smoking terms JOINTLY through the
+    // RR -> years curve is not the sum of removing each marginally (the curve is exponential), and
+    // about 0.37 is a difference of REFERENCE LEVEL — What-If credits the user back to a real
+    // never-smoker's zero dose, whereas why[] credits every z-scored factor back to the cohort mean,
+    // which for a smoker is still ~2.6 cigarettes a day. Both are the right reference for their own
+    // question ("what would change if I quit" vs "how far from average is this"), so the remainder
+    // is expected and stable — but it is mostly the reference, not the exponential.
     ("cigs_day", "Cigarettes per day"),
     ("activity", "Physical activity"),
     ("sleep_long", "Long sleep"),
@@ -354,6 +364,15 @@ const FACTORS: &[(&str, &str)] = &[
     ("cancer_hx", "Cancer history"),
     ("education", "Education"),
     ("income", "Income"),
+];
+
+/// The literature levers, which reach why[] through the same removal semantics but a different
+/// coefficient block. Part of the surfaced set: `attributions()` walks this table too.
+const LIT_LABELS: &[(&str, &str)] = &[
+    ("diet", "Diet quality"),
+    ("alcohol", "Alcohol"),
+    ("sedentary", "Sitting time"),
+    ("stress", "Perceived stress"),
 ];
 
 /// Per-factor "Why?" attribution: for each factor the user deviates from the reference on, the year
@@ -409,12 +428,6 @@ pub fn attributions(bundle: &Bundle, p: &Profile) -> Result<Vec<Attribution>, St
     }
     // Literature levers (LEV-03): same removal semantics — each answered, non-reference lever shows
     // the years its deviation is worth, at its real (often weaker) evidence grade.
-    const LIT_LABELS: &[(&str, &str)] = &[
-        ("diet", "Diet quality"),
-        ("alcohol", "Alcohol"),
-        ("sedentary", "Sitting time"),
-        ("stress", "Perceived stress"),
-    ];
     for (key, d_lp) in literature_terms(p, &bundle.coefficients) {
         if d_lp == 0.0 {
             continue; // answered exactly at the reference — nothing to explain

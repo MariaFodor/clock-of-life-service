@@ -513,7 +513,7 @@ struct Recommendation {
     priority: i32,
     evidence_grade: Option<String>,
     evidence_citation: String,
-    /// Years currently at stake on this factor (|attribution delta|).
+    /// Years currently at stake on this whole exposure: |feature delta + its companions|.
     impact_years: f64,
     /// Ranking score: impact_years × confidence(grade) × (priority/100).
     score: f64,
@@ -529,8 +529,12 @@ async fn recommendations_route(
 ) -> Result<Json<Vec<Recommendation>>, ApiError> {
     // attributions() validates the profile and gives the per-factor years-at-stake used for ranking.
     let why = attributions(&s.bundle, &profile).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    // Signed, not absolute: the sum below adds an exposure's companions, and a companion can point
+    // the other way (a smoker below the cohort's mean dose gets a POSITIVE cigs_day delta). Taking
+    // |.| per factor would book that benefit as harm and overstate what quitting is worth to exactly
+    // the smokers it is worth least to. Magnitude is taken once, after the exposure is whole.
     let impact: std::collections::HashMap<&str, f64> =
-        why.iter().map(|a| (a.key.as_str(), a.delta_years.abs())).collect();
+        why.iter().map(|a| (a.key.as_str(), a.delta_years)).collect();
 
     let rules = db::active_recommendation_rules(&s.pool).await.map_err(db_err)?;
     let mut recs: Vec<Recommendation> = Vec::new();
@@ -548,8 +552,9 @@ async fn recommendations_route(
             .and_then(|c| c.as_array())
             .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
             .unwrap_or_default();
-        let impact_years = impact.get(r.feature_key.as_str()).copied().unwrap_or(0.0)
-            + companions.iter().filter_map(|c| impact.get(c.as_str())).sum::<f64>();
+        let impact_years = (impact.get(r.feature_key.as_str()).copied().unwrap_or(0.0)
+            + companions.iter().filter_map(|c| impact.get(c.as_str())).sum::<f64>())
+            .abs();
         let confidence = match r.evidence_grade.as_deref() {
             Some("strong") => 1.0,
             Some("moderate") => 0.6,

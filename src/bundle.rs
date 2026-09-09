@@ -155,6 +155,8 @@ impl Bundle {
         }
 
         let coefficients: Coefficients = read_json(&dir.join("coefficients.json"))?;
+        // The ontology travels with the model (v3.0.0+): roles, causal edges and verified article
+        // links come from the same file the fit was constrained by, rather than a second copy that
         // can drift from it. Served verbatim so the web can draw the graph the model actually used.
         let ontology: serde_json::Value =
             read_json(&dir.join("ontology.json")).unwrap_or(serde_json::Value::Null);
@@ -194,7 +196,7 @@ impl Bundle {
         // because nothing checked the ontology against the code in this direction.
         if let Some(ont) = ontology.as_object() {
             let surfaced: std::collections::HashSet<&str> =
-                crate::scoring::FACTOR_KEYS.iter().copied().collect();
+                crate::scoring::surfaced_keys().collect();
             let unsurfaced: Vec<&String> = ont
                 .iter()
                 .filter(|(k, v)| {
@@ -284,8 +286,6 @@ impl Bundle {
         // Evidence is supplementary (powers the "Why?" citations); tolerate its absence.
         let evidence: HashMap<String, Evidence> =
             read_json(&dir.join("evidence.json")).unwrap_or_default();
-        // The ontology travels with the model (v3.0.0+): roles, causal edges and verified article
-        // links come from the same file the fit was constrained by, rather than a second copy that
 
         let mut baselines = HashMap::new();
         for iso in &manifest.countries {
