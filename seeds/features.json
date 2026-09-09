@@ -16,6 +16,14 @@
     "formula_note": "1 if the user currently smokes; never-smoker = reference"
   },
   {
+    "key": "cigs_day",
+    "name": "Cigarettes per day",
+    "role": "lever",
+    "evidence_grade": "strong",
+    "citation": "Mortality in relation to smoking: 50 years' observations on male British doctors",
+    "formula_note": "current smokers' cigarettes per day, z-scored; 0 for never/former. An unstated dose is scored at the cohort's smoker mean, not at zero."
+  },
+  {
     "key": "activity",
     "name": "Physical activity",
     "role": "lever",

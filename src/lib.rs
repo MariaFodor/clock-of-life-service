@@ -538,7 +538,18 @@ async fn recommendations_route(
         if !eval_condition(&profile, &r.condition) {
             continue;
         }
-        let impact_years = impact.get(r.feature_key.as_str()).copied().unwrap_or(0.0);
+        // A rule's impact is its whole exposure, not one indicator of it. "Quit smoking" ends both
+        // being a current smoker AND the dose, so ranking it on smk_current alone dropped over a
+        // year of harm — which briefly ranked quitting below getting more exercise. Companions come
+        // from the ontology the model was fitted under, so this cannot drift from the fit.
+        let companions: Vec<String> = s.bundle.ontology
+            .get(&r.feature_key)
+            .and_then(|f| f.get("companions"))
+            .and_then(|c| c.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+        let impact_years = impact.get(r.feature_key.as_str()).copied().unwrap_or(0.0)
+            + companions.iter().filter_map(|c| impact.get(c.as_str())).sum::<f64>();
         let confidence = match r.evidence_grade.as_deref() {
             Some("strong") => 1.0,
             Some("moderate") => 0.6,

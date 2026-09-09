@@ -152,7 +152,7 @@ fn seeds_are_reconciled() {
     let s = state().await;
     let features: i64 = sqlx::query_scalar("SELECT count(*) FROM feature WHERE active")
         .fetch_one(&s.pool).await.unwrap();
-    assert_eq!(features, 18, "18 features seeded");
+    assert_eq!(features, 19, "19 features seeded (18 + cigs_day: a lever with a total effect that the attribution surface had been missing)");
 
     // Exclude questions created by the admin-mutation test (shared DB, parallel).
     let questions: i64 = sqlx::query_scalar("SELECT count(*) FROM question WHERE active AND code NOT LIKE 'Qtest%'")
@@ -353,13 +353,11 @@ fn recommendations_rank_and_scope() {
     let recs = body_json(resp).await;
     let arr = recs.as_array().expect("array");
     assert!(!arr.is_empty(), "high-risk profile gets recommendations");
-    // Smoking is among the top advice, but not unconditionally first. This profile does literally
-    // ZERO activity, and for someone at that extreme the model says getting moving is worth
-    // marginally more than quitting (3.4 vs 3.0 years). Asserting a fixed winner encoded an
-    // assumption that only held while smk_current still absorbed the cigarette dose; what the
-    // product actually promises is that the ranking follows impact x confidence x priority.
-    let top: Vec<&str> = arr.iter().take(2).map(|r| r["feature"].as_str().unwrap()).collect();
-    assert!(top.contains(&"smk_current"), "smoking is top advice for a smoker, got {top:?}");
+    // Top recommendation is quitting smoking. This briefly ranked below activity, and weakening the
+    // assertion would have hidden the cause rather than fixed it: cigs_day is a lever with a total
+    // effect, but it was missing from FACTORS and the seeds, so over a year of smoking harm was
+    // invisible to the ranker while What-If priced it. The assertion stands; the surface was wrong.
+    assert_eq!(arr[0]["feature"], "smk_current");
     // Sorted by descending score; every recommendation is a lever or manage factor (never context).
     for pair in arr.windows(2) {
         assert!(pair[0]["score"].as_f64().unwrap() >= pair[1]["score"].as_f64().unwrap(), "sorted by score");
