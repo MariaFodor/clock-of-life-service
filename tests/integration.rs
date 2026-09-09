@@ -1335,13 +1335,14 @@ fn seed_roles_match_the_shipped_ontology() {
 fn reconciliation_spares_admin_authored_rules() {
     RT.block_on(async {
     let s = state().await;
-    let code = format!("Radmin_{}", std::process::id());
+    let code = format!("Rtest_admin_{}", std::process::id());
     // Defensive: a previous run that failed mid-test would otherwise leave this row behind.
-    sqlx::query("DELETE FROM recommendation_rule WHERE code LIKE 'Radmin_%' OR code LIKE 'Rtest_withdrawn_%'")
+    sqlx::query("DELETE FROM recommendation_rule WHERE code LIKE 'Rtest_admin_%' OR code LIKE 'Rtest_withdrawn_%'")
         .execute(&s.pool).await.ok();
-    // The condition must NEVER match a real profile: cleanup runs only on the happy path, so a
-    // matching rule surviving a failed assert would break every count and study-coverage test in
-    // the suite, permanently, on the shared database.
+    // Two protections, because a failed assert skips the cleanup at the end. The condition NEVER
+    // matches a real profile, so the content tests stay correct; and the name carries the Rtest
+    // prefix every aggregate carve-out already excludes, so the count tests do too — the earlier
+    // Radmin_ name was visible to them for one run after any failure.
     sqlx::query(
         "INSERT INTO recommendation_rule
              (code, feature_key, condition, message, priority, evidence_citation, active, managed)
