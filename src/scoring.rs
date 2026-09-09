@@ -32,7 +32,16 @@ pub struct Profile {
     #[serde(default = "default_income")] pub income: f64, // income-to-poverty ratio
     #[serde(default)] pub pm25: Option<f64>, // home annual-mean PM2.5 µg/m³ (from location, RES-04)
     #[serde(default)] pub ndvi: Option<f64>, // home greenspace NDVI (from location)
+    // Literature levers (LEV-02): unanswered (None) means "assume the average person" and
+    // contributes exactly 0 to the linear predictor, preserving the national anchoring.
+    #[serde(default)] pub diet_score: Option<f64>,    // Mediterranean-style item sum 0-5 (Q13-Q17)
+    #[serde(default)] pub alcohol: Option<String>,    // none|light|moderate|heavy (Q18)
+    #[serde(default)] pub sitting_hours: Option<f64>, // daily sitting/screen hours (Q10)
+    #[serde(default)] pub stress_score: Option<f64>,  // PSS-4 sum 0-16 (Q19 a-d)
+    #[serde(default)] pub mobility: Option<u8>,       // 0 none / 1 some / 2 a lot (Q22, fitted CONTEXT)
 }
+
+pub const ALCOHOL_LEVELS: &[&str] = &["none", "light", "moderate", "heavy"];
 fn default_income() -> f64 { 2.5 }
 
 // ENV term (RES-04): a location's log-hazard contribution vs the national-average reference. Illustrative
@@ -80,6 +89,25 @@ impl Profile {
         }
         if let Some(ndvi) = self.ndvi {
             rng("ndvi", ndvi, -1.0, 1.0)?;
+        }
+        if let Some(v) = self.diet_score {
+            rng("diet_score", v, 0.0, 5.0)?;
+        }
+        if let Some(v) = self.sitting_hours {
+            rng("sitting_hours", v, 0.0, 24.0)?;
+        }
+        if let Some(v) = self.stress_score {
+            rng("stress_score", v, 0.0, 16.0)?;
+        }
+        if let Some(m) = self.mobility {
+            if m > 2 {
+                return Err("mobility must be 0 (none), 1 (some), or 2 (a lot)".into());
+            }
+        }
+        if let Some(a) = self.alcohol.as_deref() {
+            if !ALCOHOL_LEVELS.contains(&a) {
+                return Err("alcohol must be one of none, light, moderate, heavy".into());
+            }
         }
         Ok(())
     }
@@ -130,7 +158,11 @@ pub fn design(p: &Profile, coefs: &Coefficients) -> HashMap<String, f64> {
     d.insert("diabetes".into(), b(p.diabetes));
     d.insert("high_bp".into(), b(p.high_bp));
     d.insert("respiratory".into(), b(p.respiratory));
-    d.insert("mobility".into(), 0.0); // asked separately; default none for v1 estimate
+    // The questionnaire collects mobility as ordinal 0/1/2, but the coefficient was fitted on the
+    // BINARY any-difficulty encoding (harmonize.py: pfq_diff = PFQ061B > 1), so "some" and "a lot"
+    // both score 1 — scoring 2 would extrapolate to 2β, which the fit never estimated (PR#1 F1).
+    // An ordinal refit is a model task (Bundle 8).
+    d.insert("mobility".into(), p.mobility.map_or(0.0, |m| if m > 0 { 1.0 } else { 0.0 }));
     d.insert("cvd_hx".into(), b(p.cvd_hx));
     d.insert("cancer_hx".into(), b(p.cancer_hx));
     d.insert("education".into(), b(p.higher_educ));
@@ -177,6 +209,36 @@ pub fn remaining_le(qx: &HashMap<String, f64>, start_age: i64, rr: f64) -> f64 {
     le
 }
 
+/// The literature levers' log-hazard contribution. Every term is a DEVIATION from its centring
+/// reference (bundle `literature[..].reference`): an unanswered lever or an average answer adds
+/// exactly 0, so the average person still reads RR 1.0 against the national life table (EXP-13).
+pub fn literature_lp(p: &Profile, coefs: &Coefficients) -> f64 {
+    let mut lp = 0.0;
+    let cont = [
+        ("diet", p.diet_score),
+        ("sedentary", p.sitting_hours),
+        ("stress", p.stress_score),
+    ];
+    for (key, answer) in cont {
+        if let (Some(f), Some(raw)) = (coefs.literature.get(key), answer) {
+            if let Some(beta) = f.beta {
+                // reference kind "mean" => z(reference) = 0, so the deviation is just beta * z(user).
+                lp += beta * z(raw, coefs, key);
+            }
+        }
+    }
+    if let (Some(f), Some(level)) = (coefs.literature.get("alcohol"), p.alcohol.as_deref()) {
+        if let Some(levels) = f.levels.as_ref() {
+            // The load gate guarantees: all ALCOHOL_LEVELS present, reference declared and present —
+            // so these lookups cannot silently misprice a level (PR#1 F3).
+            let reference = f.reference.as_ref().and_then(|r| r.level.as_deref()).unwrap_or("none");
+            lp += levels.get(level).copied().unwrap_or(0.0)
+                - levels.get(reference).copied().unwrap_or(0.0);
+        }
+    }
+    lp
+}
+
 /// Precise relative risk for a profile, plus the resolved country baseline.
 fn risk<'a>(bundle: &'a Bundle, p: &Profile) -> Result<(f64, &'a Baseline), String> {
     let base = bundle.baselines.get(&p.country)
@@ -184,7 +246,8 @@ fn risk<'a>(bundle: &'a Bundle, p: &Profile) -> Result<(f64, &'a Baseline), Stri
     // Cohort-fitted linear predictor + the location ENV term (context; 0 for a location-less profile,
     // and 0 for an average-location user, so the national-average reference is unaffected).
     let lp = linear_predictor(&design(p, &bundle.coefficients), &bundle.coefficients.prediction)
-        + env_term(p.pm25, p.ndvi);
+        + env_term(p.pm25, p.ndvi)
+        + literature_lp(p, &bundle.coefficients);
     let reference = if p.age < bundle.coefficients.young_cutoff { base.reference_lp.young } else { base.reference_lp.old };
     Ok(((lp - reference).exp(), base))
 }
@@ -222,6 +285,7 @@ pub struct Attribution {
 }
 
 /// Main-effect design keys (age-interaction `*_x_young` terms excluded) with user-facing labels.
+/// `mobility` fires only when the caller supplies it; unanswered profiles score 0.
 const FACTORS: &[(&str, &str)] = &[
     ("smk_former", "Former smoking"),
     ("smk_current", "Current smoking"),
@@ -242,7 +306,6 @@ const FACTORS: &[(&str, &str)] = &[
 /// delta of removing that factor's contribution. Levers use the TOTAL-EFFECT (attribution)
 /// coefficients so they read honestly; manage/context factors (no attribution term) fall back to the
 /// fitted prediction coefficient. Main effects only — the `*_x_young` terms are excluded (EXP-01).
-/// Sorted by magnitude. `mobility` is listed but is always 0 in the v1 estimate design (see `design`).
 pub fn attributions(bundle: &Bundle, p: &Profile) -> Result<Vec<Attribution>, String> {
     p.validate()?;
     let (base_rr, base) = risk(bundle, p)?;
@@ -410,7 +473,7 @@ mod tests {
     use std::path::Path;
 
     fn bundle() -> Bundle {
-        Bundle::load(Path::new("bundle/model-v2.1.0")).expect("bundle loads")
+        Bundle::load(Path::new("bundle/model-v2.2.0")).expect("bundle loads")
     }
 
     #[test]
@@ -422,10 +485,59 @@ mod tests {
             country: "RO".into(), age: 40.0, sex: "M".into(), smoke: 0, pa_min: 600.0, sleep: 7.0,
             waist: 95.0, bmi: None, cigs_day: 0.0, sbp: None, diabetes: false, high_bp: false,
             respiratory: false, cvd_hx: false, cancer_hx: false, higher_educ: false, income: 2.5,
-            pm25: None, ndvi: None,
+            pm25: None, ndvi: None, diet_score: None, alcohol: None, sitting_hours: None,
+            stress_score: None, mobility: None,
         };
         let d = design(&p, &b.coefficients);
         assert!(d["bmi"].abs() < 1e-12, "omitted bmi must be exactly neutral, got z = {}", d["bmi"]);
+    }
+
+    fn plain_profile() -> Profile {
+        Profile {
+            country: "RO".into(), age: 50.0, sex: "M".into(), smoke: 0, pa_min: 600.0, sleep: 7.0,
+            waist: 95.0, bmi: None, cigs_day: 0.0, sbp: None, diabetes: false, high_bp: false,
+            respiratory: false, cvd_hx: false, cancer_hx: false, higher_educ: false, income: 2.5,
+            pm25: None, ndvi: None, diet_score: None, alcohol: None, sitting_hours: None,
+            stress_score: None, mobility: None,
+        }
+    }
+
+    #[test]
+    fn literature_levers_neutral_at_reference() {
+        // Answering exactly at each lever's centring reference must contribute 0 log-hazard —
+        // identical to not answering at all — so the national anchoring survives LEV-02.
+        let b = bundle();
+        let mut p = plain_profile();
+        assert!(literature_lp(&p, &b.coefficients).abs() < 1e-12, "unanswered levers must be 0");
+        p.diet_score = Some(2.5);      // the shipped standardizer means
+        p.sitting_hours = Some(6.0);
+        p.stress_score = Some(6.11);
+        p.alcohol = Some("light".into()); // the shipped centring reference level
+        assert!(literature_lp(&p, &b.coefficients).abs() < 1e-9,
+                "reference answers must be neutral, got {}", literature_lp(&p, &b.coefficients));
+    }
+
+    #[test]
+    fn literature_levers_move_the_estimate_directionally() {
+        let b = bundle();
+        let years = |f: &dyn Fn(&mut Profile)| {
+            let mut p = plain_profile();
+            f(&mut p);
+            estimate(&b, &p).unwrap().estimate_years
+        };
+        let base = years(&|_| {});
+        assert!(years(&|p| p.alcohol = Some("heavy".into())) < years(&|p| p.alcohol = Some("none".into())),
+                "heavy drinking must cost more than abstaining");
+        assert!(years(&|p| p.diet_score = Some(5.0)) > years(&|p| p.diet_score = Some(0.0)),
+                "a better diet must read better than a worse one");
+        assert!(years(&|p| p.sitting_hours = Some(12.0)) < base, "heavy sitting must cost years");
+        assert!(years(&|p| p.stress_score = Some(16.0)) < base, "max stress must cost years");
+        assert!(years(&|p| p.mobility = Some(1)) < base,
+                "any mobility difficulty must lower the estimate (fitted CONTEXT beta, was hardcoded 0)");
+        // The coefficient is fitted on the BINARY any-difficulty encoding: "some" and "a lot"
+        // must price identically until the ordinal refit (PR#1 F1 pin).
+        assert_eq!(years(&|p| p.mobility = Some(1)), years(&|p| p.mobility = Some(2)),
+                "binary encoding: mobility 1 and 2 score the same");
     }
 
     #[test]
@@ -447,7 +559,8 @@ mod tests {
         let base = |smoke, pa, waist, diab| Profile {
             country: "RO".into(), age: 40.0, sex: "M".into(), smoke, pa_min: pa, sleep: 7.0,
             waist, bmi: Some(27.0), cigs_day: 0.0, sbp: None, diabetes: diab, high_bp: diab, respiratory: false, cvd_hx: false, cancer_hx: false,
-            higher_educ: true, income: 4.0, pm25: None, ndvi: None,
+            higher_educ: true, income: 4.0, pm25: None, ndvi: None, diet_score: None, alcohol: None, sitting_hours: None,
+            stress_score: None, mobility: None,
         };
         let healthy = estimate(&b, &base(0, 2000.0, 85.0, false)).unwrap();
         let high = estimate(&b, &base(2, 0.0, 115.0, true)).unwrap();
@@ -466,7 +579,8 @@ mod tests {
         let b = bundle();
         let ok = Profile { country: "RO".into(), age: 40.0, sex: "M".into(), smoke: 0, pa_min: 300.0,
             sleep: 7.0, waist: 90.0, bmi: Some(27.0), cigs_day: 0.0, sbp: None, diabetes: false, high_bp: false, respiratory: false, cvd_hx: false,
-            cancer_hx: false, higher_educ: false, income: 2.5, pm25: None, ndvi: None };
+            cancer_hx: false, higher_educ: false, income: 2.5, pm25: None, ndvi: None,
+            diet_score: None, alcohol: None, sitting_hours: None, stress_score: None, mobility: None };
         assert!(estimate(&b, &ok).is_ok());
         let bad = |f: &dyn Fn(&mut Profile)| { let mut p = ok.clone(); f(&mut p); estimate(&b, &p).is_err() };
         assert!(bad(&|p| p.pa_min = -5.0), "negative activity rejected");
@@ -491,7 +605,8 @@ mod tests {
             country: "RO".into(), age: 45.0, sex: "M".into(), smoke: 0, pa_min: 600.0, sleep: 7.0,
             waist: 90.0, bmi: Some(27.0), cigs_day: 0.0, sbp: None, diabetes: false, high_bp: false, respiratory: false, cvd_hx: false,
             cancer_hx: false, higher_educ: false, income: 2.5,
-            pm25: Some(pm25), ndvi: Some(ndvi),
+            pm25: Some(pm25), ndvi: Some(ndvi), diet_score: None, alcohol: None,
+            sitting_hours: None, stress_score: None, mobility: None,
         };
         let polluted = estimate(&b, &at(19.0, 0.35)).unwrap(); // Bucharest-like
         let clean = estimate(&b, &at(10.0, 0.70)).unwrap();    // rural-like
@@ -504,7 +619,8 @@ mod tests {
         let p = Profile {
             country: "RO".into(), age: 55.0, sex: "M".into(), smoke: 2, pa_min: 100.0, sleep: 9.0,
             waist: 110.0, bmi: Some(30.0), cigs_day: 20.0, sbp: Some(150.0), diabetes: true, high_bp: false, respiratory: false, cvd_hx: false,
-            cancer_hx: false, higher_educ: false, income: 2.5, pm25: None, ndvi: None,
+            cancer_hx: false, higher_educ: false, income: 2.5, pm25: None, ndvi: None, diet_score: None, alcohol: None, sitting_hours: None,
+            stress_score: None, mobility: None,
         };
         use serde_json::json;
         assert!(eval_condition(&p, &json!({"field": "smoke", "op": "eq", "value": 2})));
@@ -525,7 +641,8 @@ mod tests {
         let p = Profile {
             country: "RO".into(), age: 55.0, sex: "M".into(), smoke: 2, pa_min: 0.0, sleep: 7.0,
             waist: 115.0, bmi: Some(32.0), cigs_day: 20.0, sbp: Some(160.0), diabetes: true, high_bp: true, respiratory: false, cvd_hx: false,
-            cancer_hx: false, higher_educ: true, income: 4.0, pm25: None, ndvi: None,
+            cancer_hx: false, higher_educ: true, income: 4.0, pm25: None, ndvi: None, diet_score: None, alcohol: None, sitting_hours: None,
+            stress_score: None, mobility: None,
         };
         let why = attributions(&b, &p).unwrap();
         assert!(!why.is_empty(), "a high-risk profile should have explanatory factors");

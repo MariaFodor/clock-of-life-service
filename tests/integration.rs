@@ -41,7 +41,7 @@ async fn state() -> Arc<AppState> {
             if std::env::var("JWT_SECRET").is_err() {
                 std::env::set_var("JWT_SECRET", "integration-test-secret");
             }
-            let s = init_state("bundle/model-v2.1.0", &test_db_url())
+            let s = init_state("bundle/model-v2.2.0", &test_db_url())
                 .await
                 .expect("init_state (is PostgreSQL running and clock_of_life_test present?)");
             sqlx::query("TRUNCATE scenario, calculation, answer RESTART IDENTITY CASCADE")
@@ -265,7 +265,7 @@ fn estimate_why_and_context_not_recommended() {
     let est = body_json(resp).await;
 
     // model provenance block.
-    assert_eq!(est["model"]["version"], "2.1.0");
+    assert_eq!(est["model"]["version"], "2.2.0");
     assert!(est["model"]["algorithm"].as_str().is_some());
     // why[] present, populated, each entry well-formed and sensibly signed.
     let why = est["why"].as_array().expect("why[] present");
@@ -577,7 +577,7 @@ fn admin_model_pin() {
     // Restore the real active model and remove the test row (shared DB). The restore must be
     // asserted: a silent 404 here (as with the stale "2.0.0" pin this replaced) leaves the DB with
     // zero active models and makes unrelated tests fail by ordering (REVIEW-2026-09-09 S12).
-    let restore = call(&s, post_auth("/api/admin/model/pin", json!({"semver": "2.1.0", "citation": "ops: restore"}), &admin)).await;
+    let restore = call(&s, post_auth("/api/admin/model/pin", json!({"semver": "2.2.0", "citation": "ops: restore"}), &admin)).await;
     assert_eq!(restore.status(), StatusCode::OK, "restoring the active model must succeed");
     sqlx::query("DELETE FROM model_version WHERE semver = '2.0.0-test'").execute(&s.pool).await.unwrap();
     });
@@ -1149,13 +1149,63 @@ fn admin_question_codes_are_safe() {
     });
 }
 
-/// REVIEW-2026-09-09 S4: a bundle whose standardizer can't cover the scoring design is refused at
-/// load (fail closed) instead of panicking inside the estimate handler. The vendored v2.0.0 bundle
-/// predates bmi/cigs_day/sbp and is exactly such a bundle.
+/// REVIEW-2026-09-09 S4 + PR#1 F2/F3/F4: any bundle the scorer can't fully use is refused at load
+/// (fail closed) instead of panicking inside the estimate handler. Every refusal arm is pinned:
+/// the two vendored older bundles are real fixtures; the categorical/unknown-kind arms use
+/// synthetic bundles written to a temp dir.
 #[test]
 fn incompatible_bundle_refused_at_load() {
+    // v2.0.0 predates bmi/cigs_day/sbp -> design-standardizer arm.
     let err = clock_of_life_service::bundle::Bundle::load(std::path::Path::new("bundle/model-v2.0.0"))
         .err()
         .expect("v2.0.0 bundle must be refused");
     assert!(err.contains("standardizer is missing"), "got: {err}");
+
+    // v2.1.0 ships a literature block without diet/sedentary/stress standardizers -> literature arm.
+    let err = clock_of_life_service::bundle::Bundle::load(std::path::Path::new("bundle/model-v2.1.0"))
+        .err()
+        .expect("v2.1.0 bundle must be refused (rollback to it is intentionally impossible)");
+    assert!(err.contains("literature lever"), "got: {err}");
+}
+
+/// PR#1 F4: the remaining literature-gate arms, on synthetic bundles. Each variant patches the good
+/// v2.2.0 coefficients and must be refused with a message naming the reason.
+#[test]
+fn literature_gate_refuses_each_malformed_variant() {
+    let good: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string("bundle/model-v2.2.0/coefficients.json").unwrap(),
+    )
+    .unwrap();
+
+    let load_with = |patch: &dyn Fn(&mut serde_json::Value), tag: &str| -> String {
+        let mut coefs = good.clone();
+        patch(&mut coefs);
+        let dir = std::env::temp_dir().join(format!("clock-gate-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("manifest.json"),
+            serde_json::json!({"version": "0.0.0-test", "algorithm": "cox_ph",
+                               "countries": [], "checksums": {}})
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(dir.join("coefficients.json"), coefs.to_string()).unwrap();
+        let err = clock_of_life_service::bundle::Bundle::load(&dir)
+            .err()
+            .unwrap_or_else(|| panic!("malformed bundle '{tag}' must be refused"));
+        std::fs::remove_dir_all(&dir).ok();
+        err
+    };
+
+    let err = load_with(&|c| { c["literature"]["alcohol"]["levels"].as_object_mut().unwrap().remove("moderate"); }, "missing-level");
+    assert!(err.contains("missing 'moderate'"), "got: {err}");
+
+    let err = load_with(&|c| { c["literature"]["alcohol"].as_object_mut().unwrap().remove("reference"); }, "no-ref");
+    assert!(err.contains("centring reference"), "got: {err}");
+
+    let err = load_with(&|c| { c["literature"]["diet"]["kind"] = "continous_z".into(); }, "typo-kind");
+    assert!(err.contains("unknown kind"), "got: {err}");
+
+    let err = load_with(&|c| { c["literature"]["diet"]["reference"]["kind"] = "level".into(); }, "bad-ref-kind");
+    assert!(err.contains("reference kind"), "got: {err}");
 }

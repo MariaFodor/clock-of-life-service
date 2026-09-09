@@ -1,0 +1,142 @@
+{
+  "prediction": {
+    "smk_former": 0.42741126056055634,
+    "smk_current": 0.3022898105870598,
+    "cigs_day": 0.06517769057642518,
+    "activity": -0.3651005621753988,
+    "sleep_long": 0.41520461503764033,
+    "waist": 0.779123144843042,
+    "bmi": -1.0059993149995408,
+    "sbp": 0.21780187340754634,
+    "diabetes": 0.2712305185067553,
+    "high_bp": 0.4987039961102212,
+    "respiratory": 0.2618221557992217,
+    "mobility": 0.31967721499834495,
+    "cvd_hx": 0.6782733398052408,
+    "cancer_hx": 0.6809882766485634,
+    "education": -0.1254047927421323,
+    "income": -0.16556566884533402,
+    "smk_current_x_young": -0.8274716308029603,
+    "activity_x_young": 0.2636414135193169,
+    "waist_x_young": 0.10906747680351252
+  },
+  "attribution": {
+    "smk_former": 0.8306823520447206,
+    "smk_current": 1.1177921355658051,
+    "activity": -0.6410662481952334,
+    "sleep_long": 0.581951752329809,
+    "waist": 0.05958153031904077,
+    "smk_current_x_young": -1.3929428581755017,
+    "activity_x_young": 0.4634211491082035,
+    "waist_x_young": 0.057562854158636996
+  },
+  "standardizer": {
+    "activity": {
+      "mean": 4.629776223791129,
+      "sd": 2.9744461926378754
+    },
+    "waist": {
+      "mean": 98.83248580073253,
+      "sd": 16.276964722810213
+    },
+    "income": {
+      "mean": 2.486683475768353,
+      "sd": 1.63858124918941
+    },
+    "cigs_day": {
+      "mean": 2.617361137760975,
+      "sd": 6.676943790452584
+    },
+    "bmi": {
+      "mean": 28.894720474558127,
+      "sd": 6.714971136299678
+    },
+    "sbp": {
+      "mean": 123.04814146367141,
+      "sd": 17.981293682397176
+    },
+    "diet": {
+      "mean": 2.5,
+      "sd": 1.12
+    },
+    "sedentary": {
+      "mean": 6.0,
+      "sd": 2.5
+    },
+    "stress": {
+      "mean": 6.11,
+      "sd": 3.14
+    }
+  },
+  "literature": {
+    "diet": {
+      "beta": -0.15,
+      "grade": "strong",
+      "kind": "continuous_z",
+      "citation": "Trichopoulou 2003 (Mediterranean diet score); PREDIMED",
+      "note": "per +1 SD of Mediterranean-style diet score; higher = lower risk",
+      "standardizer": {
+        "mean": 2.5,
+        "sd": 1.12,
+        "source": "assumed binomial(5, 0.5) on the 0-5 item sum"
+      },
+      "reference": {
+        "kind": "mean"
+      }
+    },
+    "sedentary": {
+      "beta": 0.08,
+      "grade": "moderate",
+      "kind": "continuous_z",
+      "citation": "Chau 2013 sitting-time meta-analysis",
+      "note": "per +1 SD sitting hours; modelled jointly with activity (offset is real)",
+      "standardizer": {
+        "mean": 6.0,
+        "sd": 2.5,
+        "source": "assumed from Chau 2013 dose-response range"
+      },
+      "reference": {
+        "kind": "mean"
+      }
+    },
+    "stress": {
+      "beta": 0.05,
+      "grade": "weak",
+      "kind": "continuous_z",
+      "citation": "Cohen 1983 PSS; perceived-stress mortality cohorts",
+      "note": "per +1 SD perceived stress; low confidence",
+      "standardizer": {
+        "mean": 6.11,
+        "sd": 3.14,
+        "source": "Warttig 2013 PSS-4 population norms"
+      },
+      "reference": {
+        "kind": "mean"
+      }
+    },
+    "alcohol": {
+      "kind": "categorical_monotonic",
+      "grade": "strong_for_harm",
+      "citation": "GBD 2018/2020; Mendelian randomization (no safe level)",
+      "levels": {
+        "none": 0.0,
+        "light": 0.03,
+        "moderate": 0.12,
+        "heavy": 0.3
+      },
+      "note": "monotonic non-decreasing; never protective (J-curve refuted)",
+      "reference": {
+        "kind": "level",
+        "level": "light"
+      }
+    },
+    "env": {
+      "kind": "precomputed",
+      "beta": 1.0,
+      "grade": "moderate",
+      "citation": "WHO AQG (PM2.5 RR 1.095/10\u00b5g); Rojas-Rueda 2019 (greenspace)",
+      "note": "service computes ENV = ln(1.095)*(PM25-ref)/10 + ln(0.965)*(NDVI-ref)/0.1; coef 1.0"
+    }
+  },
+  "young_cutoff": 55
+}
