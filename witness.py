@@ -137,7 +137,7 @@ def main():
 
         # 1. Unanswered levers and answers at their centring reference are the same number.
         #    (The bundle's references: standardizer means for diet/sedentary/stress, level "light"
-        #    for alcohol — see bundle/model-v2.2.0/coefficients.json. A bundle change makes this
+        #    for alcohol — see bundle/model-v3.0.0/coefficients.json. A bundle change makes this
         #    FAIL loudly rather than drift.) relative_risk is compared too: it is rounded to 3 dp
         #    against the years' 1 dp, so it catches a centring drift ~6x smaller.
         at_reference = {**plain, "diet_score": 2.5, "sitting_hours": 6.0,

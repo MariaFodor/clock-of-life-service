@@ -202,6 +202,20 @@ async fn seed_recommendation_rules(pool: &PgPool) -> Result<(), sqlx::Error> {
         .execute(pool)
         .await?;
     }
+
+    // Reconciliation means matching desired state in BOTH directions. Upserting only meant a rule
+    // removed from the seed stayed active for ever — which is how `review_long_sleep` kept being
+    // recommended after ONT-01 demoted long sleep to a marker that must never be advised.
+    // Test-created rows (Rtest*) are left alone so parallel tests do not fight this.
+    let keep: Vec<String> = rules.iter().map(|r| r.code.clone()).collect();
+    sqlx::query(
+        "UPDATE recommendation_rule SET active = false
+         WHERE active AND code <> ALL($1) AND code NOT LIKE 'Rtest%'",
+    )
+    .bind(&keep)
+    .execute(pool)
+    .await?;
+    
     Ok(())
 }
 

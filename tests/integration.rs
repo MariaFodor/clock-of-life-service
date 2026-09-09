@@ -173,7 +173,7 @@ fn seeds_are_reconciled() {
     // Recommendation rules (API-02): all seeded, evidence-cited, referencing real features.
     let rules: i64 = sqlx::query_scalar("SELECT count(*) FROM recommendation_rule WHERE active AND code NOT LIKE 'Rtest%'")
         .fetch_one(&s.pool).await.unwrap();
-    assert_eq!(rules, 11, "11 recommendation rules seeded (7 + the 4 literature levers, LEV-03)");
+    assert_eq!(rules, 10, "10 recommendation rules seeded (review_long_sleep dropped: ONT-01 made long sleep a marker, and a marker is never recommended)");
     let uncited: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM recommendation_rule WHERE evidence_citation IS NULL OR evidence_citation = ''",
     ).fetch_one(&s.pool).await.unwrap();
@@ -802,7 +802,8 @@ fn openapi_lists_all_routes() {
     let paths = doc["paths"].as_object().expect("paths object");
     for p in [
         "/health", "/api/meta", "/api/openapi.json", "/api/auth/register", "/api/auth/login",
-        "/api/questions", "/api/references", "/api/locations", "/api/aggregates",
+        "/api/questions",
+        "/api/ontology", "/api/references", "/api/locations", "/api/aggregates",
         "/api/estimate", "/api/recommendations", "/api/whatif", "/api/relocate",
         "/api/calculations", "/api/answers", "/api/profile", "/api/profile/location",
         "/api/account/export", "/api/account",
@@ -1197,7 +1198,7 @@ fn incompatible_bundle_refused_at_load() {
 #[test]
 fn literature_gate_refuses_each_malformed_variant() {
     let good: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string("bundle/model-v2.2.0/coefficients.json").unwrap(),
+        &std::fs::read_to_string("bundle/model-v3.0.0/coefficients.json").unwrap(),
     )
     .unwrap();
 
@@ -1281,4 +1282,40 @@ fn literature_levers_surface_everywhere() {
                 "unanswered levers must not be recommended");
     }
     });
+}
+
+/// The seeds and the shipped ontology must agree on every factor's role. They disagreed after ONT-04
+/// — the service quoted `sleep_long` as a marker in why[] and recommended it as a lever in the same
+/// response cycle — so this pins them together rather than trusting them to stay in step.
+#[test]
+fn seed_roles_match_the_shipped_ontology() {
+    let ont: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string("bundle/model-v3.0.0/ontology.json").unwrap(),
+    )
+    .unwrap();
+    let feats: Vec<serde_json::Value> = serde_json::from_str(
+        &std::fs::read_to_string("seeds/features.json").unwrap(),
+    )
+    .unwrap();
+    for f in &feats {
+        let key = f["key"].as_str().unwrap();
+        if let Some(role) = ont.get(key).and_then(|s| s["role"].as_str()) {
+            assert_eq!(f["role"].as_str().unwrap(), role,
+                       "seed role for {key} disagrees with the shipped ontology");
+        }
+    }
+
+    // And nothing classified as a marker may carry a recommendation rule: the ontology says such a
+    // factor explains but is never advised.
+    let rules: Vec<serde_json::Value> = serde_json::from_str(
+        &std::fs::read_to_string("seeds/recommendation_rules.json").unwrap(),
+    )
+    .unwrap();
+    for r in &rules {
+        let key = r["feature_key"].as_str().unwrap();
+        let role = ont.get(key).and_then(|s| s["role"].as_str()).unwrap_or("lever");
+        assert_ne!(role, "marker",
+                   "rule {} recommends {key}, which the ontology classifies as a marker",
+                   r["code"].as_str().unwrap());
+    }
 }

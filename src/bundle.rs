@@ -160,6 +160,25 @@ impl Bundle {
                 ));
             }
         }
+        // A coefficient the design never emits is scored as if it were zero — v2.2.0's bmi
+        // (-1.006 per SD) would vanish silently on rollback. Refuse instead: "the bundle loads"
+        // has to mean "the bundle is scored as its author intended".
+        {
+            let emitted: std::collections::HashSet<&str> =
+                crate::scoring::DESIGN_KEYS.iter().copied().collect();
+            let orphans: Vec<&String> = coefficients
+                .prediction
+                .keys()
+                .filter(|k| !emitted.contains(k.as_str()))
+                .collect();
+            if !orphans.is_empty() {
+                return Err(format!(
+                    "coefficients.json: prediction has coefficient(s) {orphans:?} that the scoring \
+                     design never emits — they would be silently ignored. Refusing this bundle."
+                ));
+            }
+        }
+
         // Same fail-closed rule for the literature levers (PR#1 F2/F3): every declared kind is
         // fully checked, and an unknown kind refuses outright — a typo must never slip past the
         // gate and panic mid-request instead.

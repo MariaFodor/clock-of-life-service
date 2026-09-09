@@ -1,134 +1,122 @@
 [
- {
-  "code": "quit_smoking",
-  "feature_key": "smk_current",
-  "condition": {
-   "field": "smoke",
-   "op": "eq",
-   "value": 2
+  {
+    "code": "quit_smoking",
+    "feature_key": "smk_current",
+    "condition": {
+      "field": "smoke",
+      "op": "eq",
+      "value": 2
+    },
+    "priority": 100,
+    "message": "Quitting smoking is the single biggest thing you can do for your longevity — risk starts falling within weeks and keeps falling for years.",
+    "evidence_citation": "Doll & Peto; smoking mortality cohorts"
   },
-  "priority": 100,
-  "message": "Quitting smoking is the single biggest thing you can do for your longevity \u2014 risk starts falling within weeks and keeps falling for years.",
-  "evidence_citation": "Doll & Peto; smoking mortality cohorts"
- },
- {
-  "code": "increase_activity",
-  "feature_key": "activity",
-  "condition": {
-   "field": "pa_min",
-   "op": "lt",
-   "value": 500
+  {
+    "code": "increase_activity",
+    "feature_key": "activity",
+    "condition": {
+      "field": "pa_min",
+      "op": "lt",
+      "value": 500
+    },
+    "priority": 90,
+    "message": "Aim for at least 150 minutes of moderate activity a week — even a brisk daily walk measurably lowers mortality risk.",
+    "evidence_citation": "WHO physical-activity guidelines; dose-response meta-analyses"
   },
-  "priority": 90,
-  "message": "Aim for at least 150 minutes of moderate activity a week \u2014 even a brisk daily walk measurably lowers mortality risk.",
-  "evidence_citation": "WHO physical-activity guidelines; dose-response meta-analyses"
- },
- {
-  "code": "manage_hypertension",
-  "feature_key": "high_bp",
-  "condition": {
-   "field": "high_bp",
-   "op": "eq",
-   "value": true
+  {
+    "code": "manage_hypertension",
+    "feature_key": "high_bp",
+    "condition": {
+      "field": "high_bp",
+      "op": "eq",
+      "value": true
+    },
+    "priority": 85,
+    "message": "Keeping blood pressure controlled — through medication and lifestyle — is one of the most effective ways to protect your lifespan.",
+    "evidence_citation": "hypertension mortality cohorts"
   },
-  "priority": 85,
-  "message": "Keeping blood pressure controlled \u2014 through medication and lifestyle \u2014 is one of the most effective ways to protect your lifespan.",
-  "evidence_citation": "hypertension mortality cohorts"
- },
- {
-  "code": "manage_diabetes",
-  "feature_key": "diabetes",
-  "condition": {
-   "field": "diabetes",
-   "op": "eq",
-   "value": true
+  {
+    "code": "manage_diabetes",
+    "feature_key": "diabetes",
+    "condition": {
+      "field": "diabetes",
+      "op": "eq",
+      "value": true
+    },
+    "priority": 80,
+    "message": "Keeping diabetes well-managed (glucose, weight, activity) substantially reduces its impact on longevity.",
+    "evidence_citation": "diabetes mortality cohorts"
   },
-  "priority": 80,
-  "message": "Keeping diabetes well-managed (glucose, weight, activity) substantially reduces its impact on longevity.",
-  "evidence_citation": "diabetes mortality cohorts"
- },
- {
-  "code": "reduce_waist",
-  "feature_key": "waist",
-  "condition": {
-   "field": "waist",
-   "op": "gt",
-   "value": 100
+  {
+    "code": "reduce_waist",
+    "feature_key": "waist",
+    "condition": {
+      "field": "waist",
+      "op": "gt",
+      "value": 100
+    },
+    "priority": 70,
+    "message": "Reducing central fat (waist circumference) lowers mortality risk more than body weight alone — modest, sustained loss helps.",
+    "evidence_citation": "central-adiposity mortality cohorts"
   },
-  "priority": 70,
-  "message": "Reducing central fat (waist circumference) lowers mortality risk more than body weight alone \u2014 modest, sustained loss helps.",
-  "evidence_citation": "central-adiposity mortality cohorts"
- },
- {
-  "code": "manage_respiratory",
-  "feature_key": "respiratory",
-  "condition": {
-   "field": "respiratory",
-   "op": "eq",
-   "value": true
+  {
+    "code": "manage_respiratory",
+    "feature_key": "respiratory",
+    "condition": {
+      "field": "respiratory",
+      "op": "eq",
+      "value": true
+    },
+    "priority": 60,
+    "message": "Managing a respiratory condition (treatment adherence, avoiding smoke and polluted air) protects lung function and longevity.",
+    "evidence_citation": "COPD mortality cohorts"
   },
-  "priority": 60,
-  "message": "Managing a respiratory condition (treatment adherence, avoiding smoke and polluted air) protects lung function and longevity.",
-  "evidence_citation": "COPD mortality cohorts"
- },
- {
-  "code": "review_long_sleep",
-  "feature_key": "sleep_long",
-  "condition": {
-   "field": "sleep",
-   "op": "gte",
-   "value": 9
+  {
+    "code": "reduce_alcohol",
+    "feature_key": "alcohol",
+    "condition": {
+      "field": "alcohol",
+      "op": "gte",
+      "value": 2
+    },
+    "priority": 85,
+    "message": "Current evidence finds no safe level of alcohol — cutting down from moderate or heavy drinking lowers your risk, and every step down helps.",
+    "evidence_citation": "GBD 2018/2020; Mendelian randomization (no safe level)"
   },
-  "priority": 30,
-  "message": "Regularly sleeping nine or more hours can be a sign of an underlying issue rather than a cause \u2014 worth mentioning to a doctor.",
-  "evidence_citation": "Cappuccio 2010 sleep U-shape"
- },
- {
-  "code": "reduce_alcohol",
-  "feature_key": "alcohol",
-  "condition": {
-   "field": "alcohol",
-   "op": "gte",
-   "value": 2
+  {
+    "code": "improve_diet",
+    "feature_key": "diet",
+    "condition": {
+      "field": "diet_score",
+      "op": "lte",
+      "value": 2
+    },
+    "priority": 80,
+    "message": "Moving toward a Mediterranean-style pattern — more vegetables, fruit, whole grains and fish, less red and processed meat — is one of the best-evidenced dietary changes for longevity.",
+    "evidence_citation": "Trichopoulou 2003 (Mediterranean diet score); PREDIMED"
   },
-  "priority": 85,
-  "message": "Current evidence finds no safe level of alcohol \u2014 cutting down from moderate or heavy drinking lowers your risk, and every step down helps.",
-  "evidence_citation": "GBD 2018/2020; Mendelian randomization (no safe level)"
- },
- {
-  "code": "improve_diet",
-  "feature_key": "diet",
-  "condition": {
-   "field": "diet_score",
-   "op": "lte",
-   "value": 2
+  {
+    "code": "reduce_sitting",
+    "feature_key": "sedentary",
+    "condition": {
+      "field": "sitting_hours",
+      "op": "gte",
+      "value": 8
+    },
+    "priority": 60,
+    "message": "Long daily sitting time carries risk of its own, even for people who exercise — breaking it up and trimming total hours both help.",
+    "evidence_citation": "Chau 2013 sitting-time meta-analysis"
   },
-  "priority": 80,
-  "message": "Moving toward a Mediterranean-style pattern \u2014 more vegetables, fruit, whole grains and fish, less red and processed meat \u2014 is one of the best-evidenced dietary changes for longevity.",
-  "evidence_citation": "Trichopoulou 2003 (Mediterranean diet score); PREDIMED"
- },
- {
-  "code": "reduce_sitting",
-  "feature_key": "sedentary",
-  "condition": {
-   "field": "sitting_hours",
-   "op": "gte",
-   "value": 8
-  },
-  "priority": 60,
-  "message": "Long daily sitting time carries risk of its own, even for people who exercise \u2014 breaking it up and trimming total hours both help.",
-  "evidence_citation": "Chau 2013 sitting-time meta-analysis"
- },
- {
-  "code": "manage_stress",
-  "feature_key": "stress",
-  "condition": {
-   "field": "stress_score",
-   "op": "gte",
-   "value": 9
-  },
-  "priority": 50,
-  "message": "Your answers suggest a high level of perceived stress lately. Stress-management routines (movement, sleep, social contact, or professional support) are worth prioritising \u2014 the mortality link is weaker than for smoking or diet, but your wellbeing matters either way.",
-  "evidence_citation": "Cohen 1983 PSS; perceived-stress mortality cohorts"
- }
+  {
+    "code": "manage_stress",
+    "feature_key": "stress",
+    "condition": {
+      "field": "stress_score",
+      "op": "gte",
+      "value": 9
+    },
+    "priority": 50,
+    "message": "Your answers suggest a high level of perceived stress lately. Stress-management routines (movement, sleep, social contact, or professional support) are worth prioritising — the mortality link is weaker than for smoking or diet, but your wellbeing matters either way.",
+    "evidence_citation": "Cohen 1983 PSS; perceived-stress mortality cohorts"
+  }
 ]

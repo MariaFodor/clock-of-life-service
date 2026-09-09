@@ -126,6 +126,14 @@ pub struct Estimate {
 /// these keys exist, so the indexing in `z()` cannot panic on a served bundle.
 pub const STANDARDIZED_KEYS: &[&str] = &["activity", "waist", "cigs_day", "sbp", "income"];
 
+/// Every key `design()` emits. `Bundle::load` refuses a bundle carrying a prediction coefficient
+/// outside this set, because such a coefficient would be silently scored as zero.
+pub const DESIGN_KEYS: &[&str] = &[
+    "smk_former", "smk_current", "cigs_day", "sbp", "activity", "sleep_long", "waist",
+    "diabetes", "high_bp", "respiratory", "mobility", "cvd_hx", "cancer_hx", "education", "income",
+    "smk_current_x_young", "activity_x_young", "waist_x_young",
+];
+
 fn z(raw: f64, coefs: &Coefficients, key: &str) -> f64 {
     let s = &coefs.standardizer[key];
     (raw - s.mean) / s.sd
@@ -321,7 +329,7 @@ const FACTORS: &[(&str, &str)] = &[
 ];
 
 /// Per-factor "Why?" attribution: for each factor the user deviates from the reference on, the year
-/// delta of removing that factor's contribution. Levers use the TOTAL-EFFECT (attribution)
+/// delta of removing that factor's contribution. Levers use the TOTAL-EFFECT
 /// coefficients so they read honestly; manage/context factors (no attribution term) fall back to the
 /// fitted prediction coefficient. Main effects only — the `*_x_young` terms are excluded (EXP-01).
 pub fn attributions(bundle: &Bundle, p: &Profile) -> Result<Vec<Attribution>, String> {
@@ -413,7 +421,10 @@ pub fn attributions(bundle: &Bundle, p: &Profile) -> Result<Vec<Attribution>, St
     Ok(out)
 }
 
-/// A lifestyle change to explore. Only modifiable levers may change (manage/context/baseline are fixed).
+/// A lifestyle change to explore. Only modifiable LEVERS may change. `sleep` is still accepted for
+/// older clients but is no longer a lever: ONT-01 demoted long sleep to a marker, because illness
+/// causes long sleep more than the reverse, so "sleep less" is advice with no evidence of benefit.
+/// It is refused with an explanation rather than silently scored as no change.
 #[derive(Deserialize, Serialize)]
 pub struct WhatIfChanges {
     pub smoke: Option<u8>,
@@ -465,7 +476,14 @@ pub fn whatif(bundle: &Bundle, base: &Profile, changes: &WhatIfChanges) -> Resul
         }
     }
     if let Some(v) = changes.pa_min { modified.pa_min = v; }
-    if let Some(v) = changes.sleep { modified.sleep = v; }
+    if changes.sleep.is_some() {
+        // Refuse, rather than apply it and return a confident 0.0: the model has no lever
+        // coefficient for sleep since ONT-01, so any delta would be an artefact of that absence.
+        return Err("sleep is no longer a What-If lever: long sleep is a marker of illness rather \
+                    than a cause of it, so changing it has no evidenced effect to simulate \
+                    (ONT-01). It still appears in your breakdown."
+            .into());
+    }
     if let Some(v) = changes.waist { modified.waist = v; }
     if let Some(v) = changes.diet_score { modified.diet_score = Some(v); }
     if let Some(v) = changes.alcohol.clone() { modified.alcohol = Some(v); }
