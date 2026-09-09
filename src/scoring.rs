@@ -516,13 +516,14 @@ pub struct WhatIfChanges {
 /// The headline claim is COHORT evidence, not trial evidence: reduction trials are powered for
 /// cessation, not mortality. Godtfredsen 2002 followed 19,732 people for 16 years and is the exact
 /// reduction-vs-cessation-vs-continuing all-cause-mortality contrast asserted here. Both DOIs
-/// verified against api.crossref.org (title, first author and journal checked, not assumed).
+/// verified against api.crossref.org (title, first author and journal checked, not assumed) and
+/// both travel on the wire: a claim a user can read is a claim they can check.
 const REDUCTION_NOTE: &str =
     "cutting down is priced at the model's per-cigarette gradient, which is the optimistic \
      reading. Smoking risk is concave — the first few cigarettes a day carry far more than their \
-     share — and cohort studies of smokers who cut down have found little to no reduction in \
-     all-cause mortality. Quitting is worth much more. \
-     (Godtfredsen 2002, https://doi.org/10.1093/aje/kwf150)";
+     share (Bjartveit & Tverdal 2005, https://doi.org/10.1136/tc.2005.011932) — and cohort \
+     studies of smokers who cut down have found little to no reduction in all-cause mortality \
+     (Godtfredsen 2002, https://doi.org/10.1093/aje/kwf150). Quitting is worth much more.";
 
 #[derive(Serialize)]
 pub struct WhatIf {
@@ -558,8 +559,13 @@ pub fn whatif(bundle: &Bundle, base: &Profile, changes: &WhatIfChanges) -> Resul
     }
     if let Some(v) = changes.pa_min { modified.pa_min = v; }
     if let Some(v) = changes.cigs_day {
-        if !(0.0..=60.0).contains(&v) {
-            return Err("cigarettes per day must be between 0 and 60".into());
+        // 80, matching what `Profile::validate` accepts. They disagreed at 60, which meant a
+        // 70-a-day smoker had an estimable profile and every lever but this one — and the web
+        // "fixed" that by silently recording them as 60, changing their score to fit our bound.
+        // Refusing a lever to someone whose profile we already accepted is the same inconsistency
+        // this branch exists to close.
+        if !(0.0..=80.0).contains(&v) {
+            return Err("cigarettes per day must be between 0 and 80".into());
         }
         // Zero is not a dose, it is quitting — and routing it through this lever gets it WRONG.
         // design() reads a current smoker's zero as "did not answer" and imputes the cohort's
@@ -575,14 +581,16 @@ pub fn whatif(bundle: &Bundle, base: &Profile, changes: &WhatIfChanges) -> Resul
                 .into());
         }
         modified.cigs_day = v;
-        // Cutting down is not quitting, and saying so is not a detail. Compared against the
-        // EFFECTIVE dose, not the raw field: an undeclared smoker is scored at the cohort mean, so
-        // comparing raw fields stayed silent on exactly the reductions the model imputes. Gated on
-        // the BASE being a current smoker too — `base.cigs_day` is never scored for a former
-        // smoker, so a former smoker resuming at a lower number than some stale field was being
-        // congratulated for cutting down.
+        // Cutting down is not quitting, and saying so is not a detail. The comparison is against
+        // the EFFECTIVE dose, and that single change fixes both ways this used to be wrong:
+        // an undeclared smoker is scored at the cohort mean, so comparing raw fields stayed silent
+        // on exactly the reductions the model imputes; and a non-current smoker's effective dose is
+        // 0, so a former smoker RESUMING at a lower number than some stale field can no longer come
+        // in under it and be congratulated for cutting down. An explicit `base.smoke == 2` guard
+        // sat here and was pure decoration — v is always > 0 by the two checks above, so `v < 0`
+        // was already unsatisfiable. It is gone rather than left to imply it guards something.
         let base_dose = effective_cigs_day(base, &bundle.coefficients);
-        if modified.smoke == 2 && base.smoke == 2 && v < base_dose {
+        if modified.smoke == 2 && v < base_dose {
             note = Some(REDUCTION_NOTE.into());
         }
     }

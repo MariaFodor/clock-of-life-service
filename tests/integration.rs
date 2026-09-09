@@ -511,12 +511,21 @@ fn whatif_prices_cutting_down_and_says_it_is_not_quitting() {
     assert!(resumed["note"].is_null(),
             "resuming is not cutting down: {:?}", resumed["note"]);
 
+    // The lever bound matches the bound the profile itself is validated at. They disagreed at
+    // 60 vs 80, so a 70-a-day smoker had an estimable profile and every lever except this one.
+    let heavy = json!({"country": "RO", "age": 55, "sex": "M", "smoke": 2, "cigs_day": 75.0,
+                       "pa_min": 300, "sleep": 7, "waist": 100});
+    let cut = body_json(call(&s, post("/api/whatif",
+        json!({"base": heavy, "changes": {"cigs_day": 40.0}}))).await).await;
+    assert!(cut["delta_years"].as_f64().unwrap() > 0.0,
+            "a 75-a-day smoker must be able to ask about cutting down: {cut}");
+
     // The dose is bounded like every other lever, and an implausible one is refused with a reason.
     let resp = call(&s, post("/api/whatif",
         json!({"base": smoker, "changes": {"cigs_day": 300.0}}))).await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     let err = body_json(resp).await;
-    assert!(err["error"].as_str().unwrap().contains("between 0 and 60"), "got {err}");
+    assert!(err["error"].as_str().unwrap().contains("between 0 and 80"), "got {err}");
     });
 }
 
