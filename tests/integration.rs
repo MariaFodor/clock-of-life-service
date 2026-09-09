@@ -434,6 +434,101 @@ fn recommendation_prices_the_signed_exposure_not_a_pile_of_magnitudes() {
     });
 }
 
+/// Cutting down is a What-If lever, and it is priced honestly. why[] charges a smoker for the dose
+/// since the smoking contrast was corrected, so What-If has to let them ask about it — offering a
+/// different set of things than the breakdown charges for is what produced the +4.7-vs--3.0 split
+/// this bundle was released to fix.
+#[test]
+fn whatif_prices_cutting_down_and_says_it_is_not_quitting() {
+    RT.block_on(async {
+    let s = state().await;
+    let smoker = json!({"country": "RO", "age": 55, "sex": "M", "smoke": 2, "cigs_day": 20.0,
+                        "pa_min": 300, "sleep": 7, "waist": 100});
+
+    // Halving the dose helps, and less than quitting outright does.
+    let cut = body_json(call(&s, post("/api/whatif",
+        json!({"base": smoker, "changes": {"cigs_day": 10.0}}))).await).await;
+    let cut_delta = cut["delta_years"].as_f64().unwrap();
+    assert!(cut_delta > 0.0, "cutting down must help: {cut_delta}");
+    assert!(cut["note"].as_str().unwrap_or("").contains("Quitting is worth much more"),
+            "reduction must not read as equivalent to stopping: {:?}", cut["note"]);
+    assert!(cut["note"].as_str().unwrap_or("").contains("doi.org/10.1093/aje/kwf150"),
+            "an evidential claim carries its verified source: {:?}", cut["note"]);
+    assert!(!cut["note"].as_str().unwrap_or("x").contains("  "),
+            "the note must not ship its source indentation: {:?}", cut["note"]);
+
+    let quit = body_json(call(&s, post("/api/whatif",
+        json!({"base": smoker, "changes": {"smoke": 0}}))).await).await;
+    let quit_delta = quit["delta_years"].as_f64().unwrap();
+    assert!(quit_delta > cut_delta,
+            "quitting ({quit_delta}) must beat halving ({cut_delta})");
+
+    // Quitting ignores a stale dose the client left in its payload, so nobody is scored as having
+    // both stopped and still smoking twenty a day. design() is what guarantees this (it scores a
+    // non-current smoker's dose as 0 whatever the field says); the assertion is on the surface
+    // behaviour rather than on any one line, which is the level a client actually depends on.
+    let both = body_json(call(&s, post("/api/whatif",
+        json!({"base": smoker, "changes": {"smoke": 0, "cigs_day": 20.0}}))).await).await;
+    assert!((both["delta_years"].as_f64().unwrap() - quit_delta).abs() < 1e-9,
+            "quitting must ignore a stale dose: {} vs {quit_delta}", both["delta_years"]);
+    assert!(both["note"].as_str().unwrap_or("").contains("cessation"),
+            "quitting keeps the cessation note, not the cutting-down one: {:?}", both["note"]);
+
+    // The lever is monotone all the way down, because zero is refused rather than mispriced.
+    // design() reads a current smoker's zero as "did not answer" and imputes the cohort mean, so
+    // cutting to zero used to score BELOW cutting to one — the left end of the slider was the least
+    // accurate point on it.
+    let one = body_json(call(&s, post("/api/whatif",
+        json!({"base": smoker, "changes": {"cigs_day": 1.0}}))).await).await;
+    let one_delta = one["delta_years"].as_f64().unwrap();
+    assert!(one_delta > cut_delta && quit_delta > one_delta,
+            "cutting to 1 ({one_delta}) must beat cutting to 10 ({cut_delta}) and lose to quitting");
+    let resp = call(&s, post("/api/whatif",
+        json!({"base": smoker, "changes": {"cigs_day": 0.0}}))).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "a zero dose is quitting, not a dose");
+    let err = body_json(resp).await;
+    assert!(err["error"].as_str().unwrap().contains("set smoking to never"),
+            "the refusal must name the lever that does model this: {err}");
+
+    // A smoker who never told us their dose is scored at the cohort mean, so cutting to 10 IS a
+    // reduction for them. Comparing the raw field would have read 0 -> 10 as an increase and stayed
+    // silent on exactly the people the model is imputing for.
+    let undeclared = json!({"country": "RO", "age": 55, "sex": "M", "smoke": 2, "cigs_day": 0.0,
+                            "pa_min": 300, "sleep": 7, "waist": 100});
+    let cut = body_json(call(&s, post("/api/whatif",
+        json!({"base": undeclared, "changes": {"cigs_day": 10.0}}))).await).await;
+    assert!(cut["note"].as_str().unwrap_or("").contains("Quitting is worth much more"),
+            "an imputed base dose is still a dose to cut: {:?}", cut["note"]);
+
+    // A FORMER smoker's dose field is never scored, so it is not a baseline to cut from. Resuming
+    // at a lower number than some stale field is starting to smoke again, and was being congratulated
+    // for cutting down.
+    let former = json!({"country": "RO", "age": 55, "sex": "M", "smoke": 1, "cigs_day": 20.0,
+                        "pa_min": 300, "sleep": 7, "waist": 100});
+    let resumed = body_json(call(&s, post("/api/whatif",
+        json!({"base": former, "changes": {"smoke": 2, "cigs_day": 5.0}}))).await).await;
+    assert!(resumed["delta_years"].as_f64().unwrap() < 0.0, "resuming must cost years");
+    assert!(resumed["note"].is_null(),
+            "resuming is not cutting down: {:?}", resumed["note"]);
+
+    // The lever bound matches the bound the profile itself is validated at. They disagreed at
+    // 60 vs 80, so a 70-a-day smoker had an estimable profile and every lever except this one.
+    let heavy = json!({"country": "RO", "age": 55, "sex": "M", "smoke": 2, "cigs_day": 75.0,
+                       "pa_min": 300, "sleep": 7, "waist": 100});
+    let cut = body_json(call(&s, post("/api/whatif",
+        json!({"base": heavy, "changes": {"cigs_day": 40.0}}))).await).await;
+    assert!(cut["delta_years"].as_f64().unwrap() > 0.0,
+            "a 75-a-day smoker must be able to ask about cutting down: {cut}");
+
+    // The dose is bounded like every other lever, and an implausible one is refused with a reason.
+    let resp = call(&s, post("/api/whatif",
+        json!({"base": smoker, "changes": {"cigs_day": 300.0}}))).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let err = body_json(resp).await;
+    assert!(err["error"].as_str().unwrap().contains("between 0 and 80"), "got {err}");
+    });
+}
+
 /// DB3: What-If without a base is a pure overlay — nothing persisted, no auth required.
 #[test]
 fn whatif_overlay_only_when_no_base() {

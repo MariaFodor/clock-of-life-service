@@ -60,7 +60,7 @@ pub fn openapi_doc() -> Value {
 
             "/api/estimate": { "post": optional_auth_op("Answers -> Life Clock + why[] + model; persists a calculation", "scoring") },
             "/api/recommendations": { "post": op("Prioritized, evidence-cited recommendations", false, "scoring") },
-            "/api/whatif": { "post": optional_auth_op("Lifestyle-change overlay (levers incl. diet/alcohol/sitting/stress); persists a scenario if base given", "scoring") },
+            "/api/whatif": { "post": optional_auth_op("Lifestyle-change overlay (levers incl. cigarettes/day, diet/alcohol/sitting/stress; sleep is refused as a marker, as is a zero dose from a current smoker); persists a scenario if base given", "scoring") },
             "/api/relocate": { "post": op("Where Should I Live? location comparison", false, "environment") },
 
             "/api/calculations": { "get": op("The caller's calculation history", true, "history") },
