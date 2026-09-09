@@ -409,7 +409,9 @@ fn recommendation_prices_the_signed_exposure_not_a_pile_of_magnitudes() {
     let (current, dose) = exposure(&why["why"]);
     assert!(dose > 0.0, "1 cig/day is below the cohort mean, so cigs_day must be a credit: {dose}");
     let recs = body_json(call(&s, post("/api/recommendations", smoker(1.0))).await).await;
-    assert!((impact(&recs) - (current + dose).abs()).abs() < 0.051,
+    // Exact, not approximate: impact_years and the why[] deltas are both rounded to 0.1, so any
+    // real discrepancy is at least 0.1 and a loose tolerance would only hide float slop worth ~1e-16.
+    assert!((impact(&recs) - (current + dose).abs()).abs() < 1e-9,
             "impact_years must be |{current} + {dose}| = {}, got {} (summing |.| gives {})",
             (current + dose).abs(), impact(&recs), current.abs() + dose.abs());
 
@@ -419,12 +421,11 @@ fn recommendation_prices_the_signed_exposure_not_a_pile_of_magnitudes() {
     let (current, dose) = exposure(&why["why"]);
     assert!(dose < 0.0, "20 cigs/day must be harm: {dose}");
     let recs = body_json(call(&s, post("/api/recommendations", smoker(20.0))).await).await;
-    assert!((impact(&recs) - (current + dose).abs()).abs() < 0.051,
+    assert!((impact(&recs) - (current + dose).abs()).abs() < 1e-9,
             "impact_years must be |{current} + {dose}|, got {}", impact(&recs));
 
     // A rule whose feature declares no companions is untouched: its impact is its own |delta|.
-    let hyp = body_json(call(&s, post("/api/recommendations", smoker(20.0))).await).await;
-    let hyp_impact = hyp.as_array().unwrap().iter().find(|r| r["feature"] == "high_bp")
+    let hyp_impact = recs.as_array().unwrap().iter().find(|r| r["feature"] == "high_bp")
         .expect("the hypertension rule fires")["impact_years"].as_f64().unwrap();
     let why_bp = why["why"].as_array().unwrap().iter().find(|a| a["key"] == "high_bp")
         .expect("high_bp explains itself")["delta_years"].as_f64().unwrap();

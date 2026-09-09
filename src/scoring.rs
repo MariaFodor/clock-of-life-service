@@ -372,7 +372,9 @@ const FACTORS: &[(&str, &str)] = &[
 ];
 
 /// The literature levers, which reach why[] through the same removal semantics but a different
-/// coefficient block. Part of the surfaced set: `attributions()` walks this table too.
+/// coefficient block. Part of the surfaced set — but only as a label lookup: what actually reaches
+/// why[] is whatever `literature_terms()` emits, and it hardcodes its own keys. See the caveat on
+/// `surfaced_keys()`.
 const LIT_LABELS: &[(&str, &str)] = &[
     ("diet", "Diet quality"),
     ("alcohol", "Alcohol"),
