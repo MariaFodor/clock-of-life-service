@@ -24,9 +24,22 @@ def check(name, ok, detail=""):
     print(f"  [{'PASS' if ok else 'FAIL'}] {name}" + (f" — {detail}" if detail else ""))
 
 
+def _json_or_empty(status, raw):
+    """Always hand back a mapping: an error body is a string, and resp["key"] on it would raise a
+    TypeError mid-run — turning the very regression a check names into a crash instead of a FAIL."""
+    try:
+        body = json.loads(raw)
+        return status, body if isinstance(body, (dict, list)) else {}
+    except (ValueError, TypeError):
+        return status, {}
+
+
 def get(path):
-    with urllib.request.urlopen(BASE + path, timeout=5) as r:
-        return r.status, json.loads(r.read())
+    try:
+        with urllib.request.urlopen(BASE + path, timeout=5) as r:
+            return _json_or_empty(r.status, r.read())
+    except urllib.error.HTTPError as e:
+        return _json_or_empty(e.code, e.read())
 
 
 def post(path, body, token=None):
@@ -36,18 +49,22 @@ def post(path, body, token=None):
     req = urllib.request.Request(BASE + path, data=json.dumps(body).encode(), headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=5) as r:
-            return r.status, json.loads(r.read())
+            return _json_or_empty(r.status, r.read())
     except urllib.error.HTTPError as e:
-        return e.code, e.read().decode()
+        return _json_or_empty(e.code, e.read())
 
 
-def get_auth(path, token):
-    req = urllib.request.Request(BASE + path, headers={"Authorization": "Bearer " + token})
+def get_auth(path, token, method="GET"):
+    # A missing token must FAIL a check, never crash the probe on "Bearer " + None.
+    if not token:
+        return 0, {}
+    req = urllib.request.Request(BASE + path, method=method,
+                                 headers={"Authorization": "Bearer " + token})
     try:
         with urllib.request.urlopen(req, timeout=5) as r:
-            return r.status, json.loads(r.read())
+            return _json_or_empty(r.status, r.read())
     except urllib.error.HTTPError as e:
-        return e.code, e.read().decode()
+        return _json_or_empty(e.code, e.read())
 
 
 def main():
@@ -113,24 +130,32 @@ def main():
         base_years = base_est["estimate_years"]
 
         # 1. Unanswered levers and answers at their centring reference are the same number.
+        #    (The bundle's references: standardizer means for diet/sedentary/stress, level "light"
+        #    for alcohol — see bundle/model-v2.2.0/coefficients.json. A bundle change makes this
+        #    FAIL loudly rather than drift.) relative_risk is compared too: it is rounded to 3 dp
+        #    against the years' 1 dp, so it catches a centring drift ~6x smaller.
         at_reference = {**plain, "diet_score": 2.5, "sitting_hours": 6.0,
                         "stress_score": 6.11, "alcohol": "light"}
         _, ref_est = post("/api/estimate", at_reference)
         check("levers: unanswered == answered-at-reference (national anchoring holds)",
-              ref_est["estimate_years"] == base_years,
-              f'{ref_est["estimate_years"]} vs {base_years}')
+              ref_est.get("estimate_years") == base_years
+              and ref_est.get("relative_risk") == base_est.get("relative_risk"),
+              f'{ref_est.get("estimate_years")}y/{ref_est.get("relative_risk")}rr vs '
+              f'{base_years}y/{base_est.get("relative_risk")}rr')
 
         # 2. Each lever moves the estimate in the direction the evidence says.
         def years(extra):
             _, e = post("/api/estimate", {**plain, **extra})
             return e["estimate_years"]
 
-        check("lever: heavy drinking costs years vs abstaining",
-              years({"alcohol": "heavy"}) < years({"alcohol": "none"}),
-              f'{years({"alcohol": "heavy"})} < {years({"alcohol": "none"})}')
-        check("lever: a better diet outlives a worse one",
-              years({"diet_score": 5}) > years({"diet_score": 0}),
-              f'{years({"diet_score": 5})} > {years({"diet_score": 0})}')
+        # Query once and reuse: the number in the failure message must be the number that was
+        # asserted, not a second request's answer (and each estimate persists a row).
+        heavy, abstains = years({"alcohol": "heavy"}), years({"alcohol": "none"})
+        check("lever: heavy drinking costs years vs abstaining", heavy < abstains,
+              f"{heavy} < {abstains}")
+        best_diet, worst_diet = years({"diet_score": 5}), years({"diet_score": 0})
+        check("lever: a better diet outlives a worse one", best_diet > worst_diet,
+              f"{best_diet} > {worst_diet}")
         check("lever: heavy sitting costs years", years({"sitting_hours": 12}) < base_years)
         check("lever: high perceived stress costs years", years({"stress_score": 16}) < base_years)
         check("context: mobility difficulty lowers the estimate", years({"mobility": 1}) < base_years)
@@ -141,15 +166,18 @@ def main():
         risky = {**plain, "alcohol": "heavy", "diet_score": 0, "sitting_hours": 12,
                  "stress_score": 14}
         _, risky_est = post("/api/estimate", risky)
-        why = {w["key"]: w for w in risky_est["why"]}
+        why = {w["key"]: w for w in risky_est.get("why", [])}
+        levers = ("alcohol", "diet", "sedentary", "stress")
         check("why[]: all four literature levers explain themselves",
-              {"alcohol", "diet", "sedentary", "stress"} <= set(why),
-              ", ".join(sorted(why)))
+              set(levers) <= set(why), ", ".join(sorted(why)))
+        # .get() throughout: a missing lever is the regression these checks exist to catch, so it
+        # must read as a FAIL, never a KeyError that aborts the remaining checks.
         check("why[]: each lever costs years and cites its evidence",
-              all(why[k]["delta_years"] < 0 and why[k]["citation"]
-                  for k in ("alcohol", "diet", "sedentary", "stress")))
+              all(why.get(k, {}).get("delta_years", 0) < 0 and why.get(k, {}).get("citation")
+                  for k in levers))
         check("why[]: stress is shown at its honest (weak) grade",
-              why["stress"]["evidence"] == "weak", why["stress"]["evidence"])
+              why.get("stress", {}).get("evidence") == "weak",
+              str(why.get("stress", {}).get("evidence")))
 
         # 4. What-If prices them, and agrees with scoring them directly.
         _, wi = post("/api/whatif", {"base": risky,
@@ -157,23 +185,29 @@ def main():
                                                  "sitting_hours": 4, "stress_score": 4}})
         _, improved = post("/api/estimate", {**risky, "alcohol": "none", "diet_score": 5,
                                              "sitting_hours": 4, "stress_score": 4})
-        direct = round(improved["estimate_years"] - risky_est["estimate_years"], 1)
-        check("what-if: improving every lever adds years", wi["delta_years"] > 1.0,
-              f'+{wi["delta_years"]}')
+        direct = round(improved.get("estimate_years", 0) - risky_est.get("estimate_years", 0), 1)
+        overlay = wi.get("delta_years", 0)
+        check("what-if: improving every lever adds years", overlay > 1.0, f"+{overlay}")
+        # These are algebraically identical when only literature levers move; the only slack is
+        # rounding (two round1'd values differenced vs one round1'd difference) => 0.15, not 0.3.
         check("what-if: the overlay agrees with scoring the change directly",
-              abs(wi["delta_years"] - direct) <= 0.3, f'{wi["delta_years"]} vs {direct}')
+              abs(overlay - direct) <= 0.15, f"{overlay} vs {direct}")
 
         # 5. The advice targets them, with openable references — and never on an unanswered lever.
         _, recs = post("/api/recommendations", risky)
-        by_feature = {r["feature"]: r for r in recs}
+        by_feature = {r["feature"]: r for r in recs} if isinstance(recs, list) else {}
         check("recommendations: all four levers are actionable advice",
-              {"alcohol", "diet", "sedentary", "stress"} <= set(by_feature),
-              ", ".join(sorted(by_feature)))
+              set(levers) <= set(by_feature), ", ".join(sorted(by_feature)))
         check("recommendations: each carries at least one openable study",
-              all(by_feature[f]["references"] for f in ("alcohol", "diet", "sedentary", "stress")))
-        _, plain_recs = post("/api/recommendations", plain)
+              all(by_feature.get(f, {}).get("references") for f in levers))
+        # The unanswered-lever check needs a profile that DOES fire something, otherwise an empty
+        # response (dead rules table, eval_condition stuck false) would pass it trivially.
+        _, no_levers = post("/api/recommendations", {**plain, "smoke": 2, "waist": 105})
+        fired = {r["feature"] for r in no_levers} if isinstance(no_levers, list) else set()
+        check("recommendations: the engine is live for this profile (non-lever rules fire)",
+              bool(fired & {"smk_current", "waist"}), ", ".join(sorted(fired)))
         check("recommendations: an unanswered lever is never recommended",
-              not ({"alcohol", "diet", "sedentary", "stress"} & {r["feature"] for r in plain_recs}))
+              not (set(levers) & fired), ", ".join(sorted(fired)))
 
         # 6. The full interview round-trips: register -> save every answer -> read them back.
         email = f"witness-{int(time.time())}@example.com"
@@ -203,7 +237,15 @@ def main():
         check("interview: the home location is accepted", s == 200, str(s))
         s, profile = get_auth("/api/profile", token)
         check("interview: the home location reads back on the profile",
-              s == 200 and profile.get("home_location_id"), str(s))
+              bool(s == 200 and profile.get("home_location_id")), str(s))
+
+        # Probe hygiene: erase the account we created, so repeated runs don't accrete rows. This
+        # also witnesses the GDPR erasure route and the "a token for an erased account reads as
+        # unauthenticated" guard — nothing else here covers either.
+        s, _ = get_auth("/api/account", token, method="DELETE")
+        check("privacy: the probe's account erases itself (GDPR route)", s == 200, str(s))
+        s, _ = get_auth("/api/profile", token)
+        check("privacy: the erased account's token is refused (401)", s == 401, str(s))
 
         return finish()
     finally:
