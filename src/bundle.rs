@@ -15,11 +15,39 @@ pub struct Stat {
     pub sd: f64,
 }
 
+/// A literature lever's centring reference: `kind: "mean"` (z = 0 at the standardizer mean) or
+/// `kind: "level"` with the reference category in `level` (e.g. alcohol centred on "light").
+#[derive(Deserialize, Clone)]
+pub struct LitReference {
+    pub kind: String,
+    #[serde(default)]
+    pub level: Option<String>,
+}
+
+/// One literature-sourced feature (diet/alcohol/sedentary/stress/env): appended to the fitted linear
+/// predictor at its stated confidence, never fitted on the cohort (see the model's literature.py).
+#[derive(Deserialize, Clone)]
+pub struct LiteratureFeature {
+    pub kind: String, // "continuous_z" | "categorical_monotonic" | "precomputed"
+    #[serde(default)]
+    pub beta: Option<f64>,
+    #[serde(default)]
+    pub levels: Option<HashMap<String, f64>>,
+    #[serde(default)]
+    pub reference: Option<LitReference>,
+    pub grade: String,
+    #[serde(default)]
+    pub citation: String,
+}
+
 #[derive(Deserialize)]
 pub struct Coefficients {
     pub prediction: HashMap<String, f64>,
     pub attribution: HashMap<String, f64>,
     pub standardizer: HashMap<String, Stat>,
+    /// Empty for pre-v2.2.0 bundles (which are refused by the usability gate anyway).
+    #[serde(default)]
+    pub literature: HashMap<String, LiteratureFeature>,
     pub young_cutoff: f64,
 }
 
@@ -105,6 +133,25 @@ impl Bundle {
                     "coefficients.json: standardizer is missing '{key}', which the scoring design \
                      requires — refusing this bundle"
                 ));
+            }
+        }
+        // Same rule for the literature levers: a continuous term the service z-scores must ship its
+        // standardizer, and a categorical one its levels — otherwise refuse at startup, not mid-request.
+        for (key, lit) in &coefficients.literature {
+            match lit.kind.as_str() {
+                "continuous_z" if !coefficients.standardizer.contains_key(key) => {
+                    return Err(format!(
+                        "coefficients.json: literature lever '{key}' is continuous_z but has no \
+                         standardizer entry — refusing this bundle"
+                    ));
+                }
+                "categorical_monotonic" if lit.levels.is_none() => {
+                    return Err(format!(
+                        "coefficients.json: literature lever '{key}' is categorical but ships no \
+                         levels — refusing this bundle"
+                    ));
+                }
+                _ => {}
             }
         }
         // Evidence is supplementary (powers the "Why?" citations); tolerate its absence.

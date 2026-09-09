@@ -41,7 +41,7 @@ async fn state() -> Arc<AppState> {
             if std::env::var("JWT_SECRET").is_err() {
                 std::env::set_var("JWT_SECRET", "integration-test-secret");
             }
-            let s = init_state("bundle/model-v2.1.0", &test_db_url())
+            let s = init_state("bundle/model-v2.2.0", &test_db_url())
                 .await
                 .expect("init_state (is PostgreSQL running and clock_of_life_test present?)");
             sqlx::query("TRUNCATE scenario, calculation, answer RESTART IDENTITY CASCADE")
@@ -265,7 +265,7 @@ fn estimate_why_and_context_not_recommended() {
     let est = body_json(resp).await;
 
     // model provenance block.
-    assert_eq!(est["model"]["version"], "2.1.0");
+    assert_eq!(est["model"]["version"], "2.2.0");
     assert!(est["model"]["algorithm"].as_str().is_some());
     // why[] present, populated, each entry well-formed and sensibly signed.
     let why = est["why"].as_array().expect("why[] present");
@@ -577,7 +577,7 @@ fn admin_model_pin() {
     // Restore the real active model and remove the test row (shared DB). The restore must be
     // asserted: a silent 404 here (as with the stale "2.0.0" pin this replaced) leaves the DB with
     // zero active models and makes unrelated tests fail by ordering (REVIEW-2026-09-09 S12).
-    let restore = call(&s, post_auth("/api/admin/model/pin", json!({"semver": "2.1.0", "citation": "ops: restore"}), &admin)).await;
+    let restore = call(&s, post_auth("/api/admin/model/pin", json!({"semver": "2.2.0", "citation": "ops: restore"}), &admin)).await;
     assert_eq!(restore.status(), StatusCode::OK, "restoring the active model must succeed");
     sqlx::query("DELETE FROM model_version WHERE semver = '2.0.0-test'").execute(&s.pool).await.unwrap();
     });
