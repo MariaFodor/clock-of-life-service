@@ -285,6 +285,7 @@ pub struct Attribution {
 }
 
 /// Main-effect design keys (age-interaction `*_x_young` terms excluded) with user-facing labels.
+/// `mobility` fires only when the caller supplies it; unanswered profiles score 0.
 const FACTORS: &[(&str, &str)] = &[
     ("smk_former", "Former smoking"),
     ("smk_current", "Current smoking"),
@@ -305,7 +306,6 @@ const FACTORS: &[(&str, &str)] = &[
 /// delta of removing that factor's contribution. Levers use the TOTAL-EFFECT (attribution)
 /// coefficients so they read honestly; manage/context factors (no attribution term) fall back to the
 /// fitted prediction coefficient. Main effects only — the `*_x_young` terms are excluded (EXP-01).
-    // ("mobility" fires only when the caller supplies it; unanswered profiles score 0.)
 pub fn attributions(bundle: &Bundle, p: &Profile) -> Result<Vec<Attribution>, String> {
     p.validate()?;
     let (base_rr, base) = risk(bundle, p)?;
@@ -532,8 +532,12 @@ mod tests {
                 "a better diet must read better than a worse one");
         assert!(years(&|p| p.sitting_hours = Some(12.0)) < base, "heavy sitting must cost years");
         assert!(years(&|p| p.stress_score = Some(16.0)) < base, "max stress must cost years");
-        assert!(years(&|p| p.mobility = Some(2)) < base,
-                "mobility difficulty must lower the estimate (fitted CONTEXT beta, was hardcoded 0)");
+        assert!(years(&|p| p.mobility = Some(1)) < base,
+                "any mobility difficulty must lower the estimate (fitted CONTEXT beta, was hardcoded 0)");
+        // The coefficient is fitted on the BINARY any-difficulty encoding: "some" and "a lot"
+        // must price identically until the ordinal refit (PR#1 F1 pin).
+        assert_eq!(years(&|p| p.mobility = Some(1)), years(&|p| p.mobility = Some(2)),
+                "binary encoding: mobility 1 and 2 score the same");
     }
 
     #[test]

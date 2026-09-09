@@ -141,6 +141,14 @@ impl Bundle {
         for (key, lit) in &coefficients.literature {
             match lit.kind.as_str() {
                 "continuous_z" => {
+                    // A continuous lever without a beta would load fine and silently contribute
+                    // 0.0 for every answer — the lever disappears with no error (PR#1 re-review).
+                    if lit.beta.is_none() {
+                        return Err(format!(
+                            "coefficients.json: literature lever '{key}' is continuous_z but ships \
+                             no beta — refusing this bundle"
+                        ));
+                    }
                     if !coefficients.standardizer.contains_key(key) {
                         return Err(format!(
                             "coefficients.json: literature lever '{key}' is continuous_z but has no \
@@ -183,6 +191,8 @@ impl Bundle {
                         }
                     }
                 }
+                // "precomputed": the term is computed by the service (env_term hardcodes the
+                // RES-04 formula); the shipped beta is intentionally not consumed.
                 "precomputed" => {}
                 other => {
                     return Err(format!(
