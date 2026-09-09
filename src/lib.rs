@@ -80,14 +80,25 @@ pub fn default_database_url() -> String {
         .unwrap_or_else(|_| "postgresql:///clock_of_life?host=/var/run/postgresql".to_string())
 }
 
-/// The JWT signing secret from `JWT_SECRET`. Falls back to an insecure dev key with a loud warning —
-/// production must set `JWT_SECRET` (tokens signed with the dev key are worthless if the env is set).
-pub fn jwt_secret() -> Vec<u8> {
+/// The JWT signing secret from `JWT_SECRET`. Fail closed (like the bundle checksum gate): without a
+/// real secret anyone could forge any account's token — incl. admin — so the service refuses to start
+/// unless the operator explicitly opts into the insecure development key with CLOCK_DEV_INSECURE_JWT=1
+/// (REVIEW-2026-09-09 S5).
+pub fn jwt_secret() -> Result<Vec<u8>, String> {
     match std::env::var("JWT_SECRET") {
-        Ok(s) if !s.is_empty() => s.into_bytes(),
+        Ok(s) if !s.is_empty() => Ok(s.into_bytes()),
         _ => {
-            eprintln!("WARNING: JWT_SECRET not set — using an insecure development key. Set JWT_SECRET in production.");
-            b"insecure-dev-key-do-not-use-in-production".to_vec()
+            if std::env::var("CLOCK_DEV_INSECURE_JWT").as_deref() == Ok("1") {
+                eprintln!(
+                    "WARNING: JWT_SECRET not set — serving with the INSECURE development key because \
+                     CLOCK_DEV_INSECURE_JWT=1. Anyone can forge tokens. Never use in production."
+                );
+                Ok(b"insecure-dev-key-do-not-use-in-production".to_vec())
+            } else {
+                Err("JWT_SECRET is not set — refusing to start. Set JWT_SECRET, or export \
+                     CLOCK_DEV_INSECURE_JWT=1 to accept an insecure development key."
+                    .into())
+            }
         }
     }
 }
@@ -110,7 +121,7 @@ pub async fn init_state(bundle_dir: &str, database_url: &str) -> Result<Arc<AppS
         active_model_id: seeded.active_model_id,
         anon_account_id: seeded.anon_account_id,
         anon_profile_id: seeded.anon_profile_id,
-        jwt_secret: jwt_secret(),
+        jwt_secret: jwt_secret().map_err(|e| format!("auth config: {e}"))?,
         token_ttl_secs: 7 * 24 * 3600, // 7 days
         web_dist: std::env::var("WEB_DIST").unwrap_or_else(|_| "web-dist".to_string()),
     }))
@@ -177,22 +188,34 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for Auth {
             .ok_or_else(|| unauth("malformed authorization header"))?;
         let id = auth::verify_token(token.trim(), &state.jwt_secret)
             .map_err(|_| unauth("invalid or expired token"))?;
+        // A signature-valid token for an erased account must read as unauthenticated, not surface
+        // as FK-violation 500s downstream (REVIEW-2026-09-09 S3: GDPR-erasure path).
+        let exists = db::account_exists(&state.pool, id).await.map_err(db_err)?;
+        if !exists {
+            return Err(unauth("account no longer exists"));
+        }
         Ok(Auth(id))
     }
 }
 
-/// Like `Auth`, but never rejects — `None` when no valid token is present (try-before-signup paths).
+/// Like `Auth`, but `None` when no credential was offered (try-before-signup paths). A *present*
+/// Authorization header must still be valid: silently downgrading an expired token to the shared
+/// anonymous account would persist the caller's inputs outside their history, export, and erasure
+/// (REVIEW-2026-09-09 S3).
 pub struct OptionalAuth(pub Option<Uuid>);
 
 #[axum::async_trait]
 impl axum::extract::FromRequestParts<Arc<AppState>> for OptionalAuth {
-    type Rejection = std::convert::Infallible;
+    type Rejection = ApiError;
 
     async fn from_request_parts(
         parts: &mut axum::http::request::Parts,
         state: &Arc<AppState>,
     ) -> Result<Self, Self::Rejection> {
-        Ok(OptionalAuth(Auth::from_request_parts(parts, state).await.ok().map(|a| a.0)))
+        if parts.headers.get(axum::http::header::AUTHORIZATION).is_none() {
+            return Ok(OptionalAuth(None));
+        }
+        Auth::from_request_parts(parts, state).await.map(|a| OptionalAuth(Some(a.0)))
     }
 }
 
@@ -810,6 +833,19 @@ struct QuestionCreate {
     citation: String,
 }
 
+/// Admin-supplied codes become part of public payloads and ORDER BY expressions — keep them tame.
+fn validate_code(code: &str) -> Result<(), ApiError> {
+    let ok = !code.is_empty()
+        && code.len() <= 64
+        && code.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    if ok { Ok(()) } else {
+        Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "code must be 1-64 characters of letters, digits, or underscore",
+        ))
+    }
+}
+
 /// Create a question (admin). Writes an audit event; duplicate code → 409.
 async fn admin_create_question(
     State(s): State<Arc<AppState>>,
@@ -817,6 +853,7 @@ async fn admin_create_question(
     Json(req): Json<QuestionCreate>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     require_citation(&req.citation)?;
+    validate_code(&req.code)?;
     let after = db::admin_create_question(
         &s.pool, admin, &req.code, &req.section, &req.text, &req.input_type,
         req.options.as_ref(), req.feature_key.as_deref(), req.required, req.evidence_citation.as_deref(),
@@ -927,6 +964,7 @@ async fn admin_create_rule(
     Json(req): Json<RuleCreate>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     require_citation(&req.citation)?;
+    validate_code(&req.code)?;
     if req.evidence_citation.trim().is_empty() {
         return Err((StatusCode::BAD_REQUEST, "evidence_citation is required for a rule".to_string()).into());
     }

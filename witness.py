@@ -7,6 +7,7 @@ witnessed behaviour, prints a human-readable verdict, and returns non-zero on an
     python3 witness.py
 """
 import json
+import os
 import subprocess
 import sys
 import time
@@ -39,8 +40,11 @@ def post(path, body):
 
 def main():
     subprocess.run(["cargo", "build", "--quiet"], check=True)
+    # The service fails closed without a JWT secret (REVIEW-2026-09-09 S5) — the probe supplies one.
+    env = dict(os.environ)
+    env.setdefault("JWT_SECRET", "witness-probe-secret")
     srv = subprocess.Popen(["./target/debug/clock-of-life-service"],
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
     try:
         # wait for liveness
         for _ in range(50):
@@ -55,7 +59,7 @@ def main():
         check("GET /health 200", get("/health")[0] == 200)
 
         s, meta = get("/api/meta")
-        check("GET /api/meta model 2.0.0", meta.get("model_version") == "2.0.0", str(meta.get("model_version")))
+        check("GET /api/meta model 2.1.0", meta.get("model_version") == "2.1.0", str(meta.get("model_version")))
         check("meta lists 30 countries", len(meta.get("countries", [])) == 30, str(len(meta.get("countries", []))))
 
         ro = {"country": "RO", "age": 40, "sex": "M", "smoke": 0, "pa_min": 2000, "sleep": 7,

@@ -96,6 +96,17 @@ impl Bundle {
         }
 
         let coefficients: Coefficients = read_json(&dir.join("coefficients.json"))?;
+        // The checksum gate proves integrity, not usability: a bundle whose standardizer lacks a key
+        // the scoring design z-scores would panic inside the estimate handler. Refuse it here, at
+        // startup, like any other bad bundle (REVIEW-2026-09-09 S4).
+        for key in crate::scoring::STANDARDIZED_KEYS {
+            if !coefficients.standardizer.contains_key(*key) {
+                return Err(format!(
+                    "coefficients.json: standardizer is missing '{key}', which the scoring design \
+                     requires — refusing this bundle"
+                ));
+            }
+        }
         // Evidence is supplementary (powers the "Why?" citations); tolerate its absence.
         let evidence: HashMap<String, Evidence> =
             read_json(&dir.join("evidence.json")).unwrap_or_default();

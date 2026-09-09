@@ -20,7 +20,7 @@ pub struct Profile {
     pub pa_min: f64, // weekly MET-minutes
     pub sleep: f64,  // hours
     pub waist: f64,  // cm
-    #[serde(default = "default_bmi")] pub bmi: f64,       // body-mass index (kg/m²), from height + weight
+    #[serde(default)] pub bmi: Option<f64>,               // body-mass index (kg/m²), from height + weight
     #[serde(default)] pub cigs_day: f64,                  // current-smoker cigarettes/day (0 if not current)
     #[serde(default)] pub sbp: Option<f64>,               // systolic BP (mmHg) if known; else derived from high_bp
     #[serde(default)] pub diabetes: bool,
@@ -34,8 +34,6 @@ pub struct Profile {
     #[serde(default)] pub ndvi: Option<f64>, // home greenspace NDVI (from location)
 }
 fn default_income() -> f64 { 2.5 }
-// Cohort-mean BMI, used only when a legacy client omits it (the questionnaire always sends height+weight).
-fn default_bmi() -> f64 { 27.0 }
 
 // ENV term (RES-04): a location's log-hazard contribution vs the national-average reference. Illustrative
 // RO reference — must be re-sourced with real RO PM2.5/NDVI layers before the relocation surface ships.
@@ -69,7 +67,9 @@ impl Profile {
             return Err("sleep must be between 0 and 24 hours".into());
         }
         rng("waist", self.waist, 40.0, 250.0)?;
-        rng("bmi", self.bmi, 12.0, 70.0)?;
+        if let Some(bmi) = self.bmi {
+            rng("bmi", bmi, 12.0, 70.0)?;
+        }
         rng("cigs_day", self.cigs_day, 0.0, 80.0)?;
         if let Some(sbp) = self.sbp {
             rng("sbp", sbp, 70.0, 240.0)?;
@@ -94,6 +94,10 @@ pub struct Estimate {
     pub country: String,
 }
 
+/// Every design input that is z-scored against the bundle standardizer. `Bundle::load` validates
+/// these keys exist, so the indexing in `z()` cannot panic on a served bundle.
+pub const STANDARDIZED_KEYS: &[&str] = &["activity", "waist", "cigs_day", "bmi", "sbp", "income"];
+
 fn z(raw: f64, coefs: &Coefficients, key: &str) -> f64 {
     let s = &coefs.standardizer[key];
     (raw - s.mean) / s.sd
@@ -111,7 +115,11 @@ pub fn design(p: &Profile, coefs: &Coefficients) -> HashMap<String, f64> {
     // Current-smoker dose: 0 for never/former (matches the training encoding in config/features.py).
     let cigs = if p.smoke == 2 { p.cigs_day } else { 0.0 };
     d.insert("cigs_day".into(), z(cigs, coefs, "cigs_day"));
-    d.insert("bmi".into(), z(p.bmi, coefs, "bmi"));
+    // An omitted BMI must be neutral: the standardizer mean scores exactly z = 0. A hardcoded
+    // constant (the old 27.0 vs the bundle mean 28.9) silently penalised every BMI-less request
+    // by RR ×1.33 (REVIEW-2026-09-09 S2).
+    let bmi = p.bmi.unwrap_or(coefs.standardizer["bmi"].mean);
+    d.insert("bmi".into(), z(bmi, coefs, "bmi"));
     // Systolic BP: a real reading when known; otherwise derived from the high-BP answer
     // (NHANES hbp-conditional means), so the field refines rather than duplicates high_bp.
     let sbp = p.sbp.unwrap_or(if p.high_bp { 132.7 } else { 117.9 });
@@ -406,6 +414,21 @@ mod tests {
     }
 
     #[test]
+    fn omitted_bmi_is_neutral() {
+        // A profile without BMI must score z = 0 on the bmi term — the standardizer mean, not a
+        // hardcoded constant (the old 27.0 default silently added RR ×1.33; REVIEW-2026-09-09 S2).
+        let b = bundle();
+        let p = Profile {
+            country: "RO".into(), age: 40.0, sex: "M".into(), smoke: 0, pa_min: 600.0, sleep: 7.0,
+            waist: 95.0, bmi: None, cigs_day: 0.0, sbp: None, diabetes: false, high_bp: false,
+            respiratory: false, cvd_hx: false, cancer_hx: false, higher_educ: false, income: 2.5,
+            pm25: None, ndvi: None,
+        };
+        let d = design(&p, &b.coefficients);
+        assert!(d["bmi"].abs() < 1e-12, "omitted bmi must be exactly neutral, got z = {}", d["bmi"]);
+    }
+
+    #[test]
     fn avg_person_matches_national_life_expectancy() {
         // By construction the average person has LP == reference_lp, so RR == 1 and remaining years
         // must equal the national life-table figure the bundle stored.
@@ -423,7 +446,7 @@ mod tests {
         let b = bundle();
         let base = |smoke, pa, waist, diab| Profile {
             country: "RO".into(), age: 40.0, sex: "M".into(), smoke, pa_min: pa, sleep: 7.0,
-            waist, bmi: 27.0, cigs_day: 0.0, sbp: None, diabetes: diab, high_bp: diab, respiratory: false, cvd_hx: false, cancer_hx: false,
+            waist, bmi: Some(27.0), cigs_day: 0.0, sbp: None, diabetes: diab, high_bp: diab, respiratory: false, cvd_hx: false, cancer_hx: false,
             higher_educ: true, income: 4.0, pm25: None, ndvi: None,
         };
         let healthy = estimate(&b, &base(0, 2000.0, 85.0, false)).unwrap();
@@ -442,7 +465,7 @@ mod tests {
     fn rejects_bad_input() {
         let b = bundle();
         let ok = Profile { country: "RO".into(), age: 40.0, sex: "M".into(), smoke: 0, pa_min: 300.0,
-            sleep: 7.0, waist: 90.0, bmi: 27.0, cigs_day: 0.0, sbp: None, diabetes: false, high_bp: false, respiratory: false, cvd_hx: false,
+            sleep: 7.0, waist: 90.0, bmi: Some(27.0), cigs_day: 0.0, sbp: None, diabetes: false, high_bp: false, respiratory: false, cvd_hx: false,
             cancer_hx: false, higher_educ: false, income: 2.5, pm25: None, ndvi: None };
         assert!(estimate(&b, &ok).is_ok());
         let bad = |f: &dyn Fn(&mut Profile)| { let mut p = ok.clone(); f(&mut p); estimate(&b, &p).is_err() };
@@ -466,7 +489,7 @@ mod tests {
         let b = bundle();
         let at = |pm25, ndvi| Profile {
             country: "RO".into(), age: 45.0, sex: "M".into(), smoke: 0, pa_min: 600.0, sleep: 7.0,
-            waist: 90.0, bmi: 27.0, cigs_day: 0.0, sbp: None, diabetes: false, high_bp: false, respiratory: false, cvd_hx: false,
+            waist: 90.0, bmi: Some(27.0), cigs_day: 0.0, sbp: None, diabetes: false, high_bp: false, respiratory: false, cvd_hx: false,
             cancer_hx: false, higher_educ: false, income: 2.5,
             pm25: Some(pm25), ndvi: Some(ndvi),
         };
@@ -480,7 +503,7 @@ mod tests {
     fn condition_evaluation() {
         let p = Profile {
             country: "RO".into(), age: 55.0, sex: "M".into(), smoke: 2, pa_min: 100.0, sleep: 9.0,
-            waist: 110.0, bmi: 30.0, cigs_day: 20.0, sbp: Some(150.0), diabetes: true, high_bp: false, respiratory: false, cvd_hx: false,
+            waist: 110.0, bmi: Some(30.0), cigs_day: 20.0, sbp: Some(150.0), diabetes: true, high_bp: false, respiratory: false, cvd_hx: false,
             cancer_hx: false, higher_educ: false, income: 2.5, pm25: None, ndvi: None,
         };
         use serde_json::json;
@@ -501,7 +524,7 @@ mod tests {
         let b = bundle();
         let p = Profile {
             country: "RO".into(), age: 55.0, sex: "M".into(), smoke: 2, pa_min: 0.0, sleep: 7.0,
-            waist: 115.0, bmi: 32.0, cigs_day: 20.0, sbp: Some(160.0), diabetes: true, high_bp: true, respiratory: false, cvd_hx: false,
+            waist: 115.0, bmi: Some(32.0), cigs_day: 20.0, sbp: Some(160.0), diabetes: true, high_bp: true, respiratory: false, cvd_hx: false,
             cancer_hx: false, higher_educ: true, income: 4.0, pm25: None, ndvi: None,
         };
         let why = attributions(&b, &p).unwrap();

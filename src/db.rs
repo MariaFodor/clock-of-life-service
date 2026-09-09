@@ -175,10 +175,19 @@ pub async fn list_questions(pool: &PgPool) -> Result<Vec<QuestionRow>, sqlx::Err
                 evidence_citation
          FROM question
          WHERE active
-         ORDER BY (regexp_replace(code, '[^0-9]', '', 'g'))::int",
+         ORDER BY NULLIF(regexp_replace(code, '[^0-9]', '', 'g'), '')::numeric NULLS LAST, code",
     )
     .fetch_all(pool)
     .await
+}
+
+/// Does the account still exist? Consulted by the `Auth` extractor so tokens for erased accounts
+/// read as unauthenticated (401) instead of failing downstream with FK errors.
+pub async fn account_exists(pool: &PgPool, account_id: Uuid) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM account WHERE id = $1)")
+        .bind(account_id)
+        .fetch_one(pool)
+        .await
 }
 
 /// A profile's metadata (its answers are read separately via `list_answers`).

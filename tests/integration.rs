@@ -37,6 +37,10 @@ static COUNTER: AtomicU64 = AtomicU64::new(0);
 async fn state() -> Arc<AppState> {
     STATE
         .get_or_init(|| async {
+            // The service now fails closed without a JWT secret (S5); tests supply one.
+            if std::env::var("JWT_SECRET").is_err() {
+                std::env::set_var("JWT_SECRET", "integration-test-secret");
+            }
             let s = init_state("bundle/model-v2.1.0", &test_db_url())
                 .await
                 .expect("init_state (is PostgreSQL running and clock_of_life_test present?)");
@@ -570,8 +574,11 @@ fn admin_model_pin() {
     let audit = body_json(call(&s, get_auth("/api/admin/audit", &admin)).await).await;
     assert!(audit.as_array().unwrap().iter().any(|e| e["entity"] == "model_version" && e["action"] == "pin_model"));
 
-    // Restore the real active model and remove the test row (shared DB).
-    call(&s, post_auth("/api/admin/model/pin", json!({"semver": "2.0.0", "citation": "ops: restore"}), &admin)).await;
+    // Restore the real active model and remove the test row (shared DB). The restore must be
+    // asserted: a silent 404 here (as with the stale "2.0.0" pin this replaced) leaves the DB with
+    // zero active models and makes unrelated tests fail by ordering (REVIEW-2026-09-09 S12).
+    let restore = call(&s, post_auth("/api/admin/model/pin", json!({"semver": "2.1.0", "citation": "ops: restore"}), &admin)).await;
+    assert_eq!(restore.status(), StatusCode::OK, "restoring the active model must succeed");
     sqlx::query("DELETE FROM model_version WHERE semver = '2.0.0-test'").execute(&s.pool).await.unwrap();
     });
 }
@@ -659,7 +666,9 @@ fn account_erasure_cascades() {
     assert_eq!(acct, 0, "account deleted");
     let calcs: i64 = sqlx::query_scalar("SELECT count(*) FROM calculation WHERE account_id = $1::uuid").bind(&a_id).fetch_one(&s.pool).await.unwrap();
     assert_eq!(calcs, 0, "calculations cascade-deleted");
-    assert_eq!(call(&s, get_auth("/api/account/export", &a)).await.status(), StatusCode::NOT_FOUND);
+    // The erased account's still-signature-valid token now reads as unauthenticated everywhere
+    // (Auth checks account existence — REVIEW-2026-09-09 S3), never a 404/500 mix.
+    assert_eq!(call(&s, get_auth("/api/account/export", &a)).await.status(), StatusCode::UNAUTHORIZED);
 
     // B is untouched.
     let b_calcs = body_json(call(&s, get_auth("/api/calculations", &b)).await).await;
@@ -1071,4 +1080,82 @@ fn bad_input_rejected() {
     let resp = call(&s, post("/api/estimate", bad)).await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     });
+}
+
+
+/// REVIEW-2026-09-09 S3: a deleted account's token is 401 on every authed surface (no FK 500s),
+/// and a *present but invalid* Authorization header on the optional-auth estimate path is 401 —
+/// never a silent downgrade to the shared anonymous account.
+#[test]
+fn auth_hardening_deleted_account_and_bad_bearer() {
+    RT.block_on(async {
+    let s = state().await;
+    let token = register_token(&s).await;
+    call(&s, post_auth("/api/estimate", valid_profile(), &token)).await;
+    assert_eq!(call(&s, delete_auth("/api/account", &token)).await.status(), StatusCode::OK);
+
+    // Every authed surface answers 401 for the orphaned token.
+    for req in [
+        get_auth("/api/calculations", &token),
+        get_auth("/api/profile", &token),
+        get_auth("/api/answers", &token),
+    ] {
+        assert_eq!(call(&s, req).await.status(), StatusCode::UNAUTHORIZED);
+    }
+    // The optional-auth estimate also refuses the orphaned credential instead of re-owning
+    // the inputs to the anon account.
+    assert_eq!(call(&s, post_auth("/api/estimate", valid_profile(), &token)).await.status(), StatusCode::UNAUTHORIZED);
+
+    // Garbage bearer on the optional-auth path: 401, not anonymous fallback.
+    assert_eq!(call(&s, post_auth("/api/estimate", valid_profile(), "not-a-jwt")).await.status(), StatusCode::UNAUTHORIZED);
+    // No header at all stays open (try-before-signup).
+    assert_eq!(call(&s, post("/api/estimate", valid_profile())).await.status(), StatusCode::OK);
+    });
+}
+
+/// REVIEW-2026-09-09 S6: a digit-less admin question code must not 500 the public interview
+/// (the old ORDER BY cast crashed on ''), and malformed codes are rejected up front.
+#[test]
+fn admin_question_codes_are_safe() {
+    RT.block_on(async {
+    let s = state().await;
+    let admin = register_admin(&s).await;
+
+    // Malformed codes → 400.
+    for bad in ["", "has space", "semi;colon", "way-too-long"] {
+        let body = json!({"code": if bad == "way-too-long" { "x".repeat(65) } else { bad.to_string() },
+                          "section": "S", "text": "t?", "input_type": "number", "citation": "c"});
+        assert_eq!(call(&s, post_auth("/api/admin/questions", body, &admin)).await.status(),
+                   StatusCode::BAD_REQUEST, "code {bad:?} must be rejected");
+    }
+
+    // A valid but truly digit-less code is accepted and the public listing survives it — the old
+    // `(regexp_replace(code,'[^0-9]','','g'))::int` ORDER BY crashed on '' with a 500. The Qtest
+    // prefix keeps the row out of the other tests' exactly-24-questions assertions.
+    let code = "QtestNODIGITS";
+    sqlx::query("DELETE FROM question WHERE code = $1").bind(code).execute(&s.pool).await.unwrap(); // leftover from a crashed run
+    let body = json!({"code": code, "section": "S", "text": "t?", "input_type": "number", "citation": "c"});
+    assert_eq!(call(&s, post_auth("/api/admin/questions", body, &admin)).await.status(), StatusCode::OK);
+    let resp = call(&s, get("/api/questions")).await;
+    assert_eq!(resp.status(), StatusCode::OK, "digit-less code must not 500 the interview");
+    let arr = body_json(resp).await;
+    let codes: Vec<String> = arr.as_array().unwrap().iter().map(|q| q["code"].as_str().unwrap().to_string()).collect();
+    let ours = codes.iter().position(|c| c == code).expect("digit-less code listed");
+    let q24 = codes.iter().position(|c| c == "Q24_area_type").expect("Q24 listed");
+    assert!(ours > q24, "digit-less codes sort after the numeric Q1..Q24 (NULLS LAST)");
+    // Clean up the shared DB (other tests assert exactly 24 active questions).
+    sqlx::query("DELETE FROM audit_event WHERE entity = 'question' AND entity_id = $1").bind(code).execute(&s.pool).await.unwrap();
+    sqlx::query("DELETE FROM question WHERE code = $1").bind(code).execute(&s.pool).await.unwrap();
+    });
+}
+
+/// REVIEW-2026-09-09 S4: a bundle whose standardizer can't cover the scoring design is refused at
+/// load (fail closed) instead of panicking inside the estimate handler. The vendored v2.0.0 bundle
+/// predates bmi/cigs_day/sbp and is exactly such a bundle.
+#[test]
+fn incompatible_bundle_refused_at_load() {
+    let err = clock_of_life_service::bundle::Bundle::load(std::path::Path::new("bundle/model-v2.0.0"))
+        .err()
+        .expect("v2.0.0 bundle must be refused");
+    assert!(err.contains("standardizer is missing"), "got: {err}");
 }

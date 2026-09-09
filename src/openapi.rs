@@ -20,6 +20,15 @@ fn op(summary: &str, auth: bool, tag: &str) -> Value {
     o
 }
 
+/// Auth is optional (try-before-signup), but a *present* invalid credential is refused with 401 —
+/// it is never silently downgraded to anonymous (REVIEW-2026-09-09 S3).
+fn optional_auth_op(summary: &str, tag: &str) -> Value {
+    let mut o = op(summary, false, tag);
+    o["responses"]["401"] =
+        json!({ "description": "Authorization header present but invalid or expired" });
+    o
+}
+
 /// The full OpenAPI document.
 pub fn openapi_doc() -> Value {
     json!({
@@ -48,9 +57,9 @@ pub fn openapi_doc() -> Value {
             "/api/locations": { "get": op("Locations with PM2.5 / greenspace", false, "environment") },
             "/api/aggregates": { "get": op("k-anonymized cohort distributions", false, "aggregates") },
 
-            "/api/estimate": { "post": op("Answers -> Life Clock + why[] + model; persists a calculation", false, "scoring") },
+            "/api/estimate": { "post": optional_auth_op("Answers -> Life Clock + why[] + model; persists a calculation", "scoring") },
             "/api/recommendations": { "post": op("Prioritized, evidence-cited recommendations", false, "scoring") },
-            "/api/whatif": { "post": op("Lifestyle-change overlay; persists a scenario if base given", false, "scoring") },
+            "/api/whatif": { "post": optional_auth_op("Lifestyle-change overlay; persists a scenario if base given", "scoring") },
             "/api/relocate": { "post": op("Where Should I Live? location comparison", false, "environment") },
 
             "/api/calculations": { "get": op("The caller's calculation history", true, "history") },

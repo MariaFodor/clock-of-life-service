@@ -9,8 +9,9 @@ scenarios and reconciles its reference tables (features, questions, active model
 - Default connection: `postgresql:///clock_of_life?host=/var/run/postgresql` (unix socket, peer auth).
   Override with the `DATABASE_URL` env var. The database must exist; tables are created by the
   migrations at startup.
-- `JWT_SECRET` signs bearer tokens. **Set it in production** — an unset secret falls back to an
-  insecure development key (with a startup warning).
+- `JWT_SECRET` signs bearer tokens and is **required**: without it the service refuses to start
+  (fail closed). For local development only, `CLOCK_DEV_INSECURE_JWT=1` opts into an insecure
+  well-known key (loud startup warning).
 
 ```bash
 createdb clock_of_life          # once
