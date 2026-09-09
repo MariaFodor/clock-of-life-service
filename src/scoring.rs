@@ -324,11 +324,16 @@ pub struct Attribution {
     pub year: Option<i32>,
 }
 
-/// Every design key this build can explain in why[] — derived from the two tables `attributions()`
-/// actually walks, never hand-copied. `Bundle::load` refuses a bundle whose ontology declares a
-/// lever with a total effect that is absent from here, so a second list would fail in the one
-/// direction that matters: a key listed here but missing from the tables passes the gate and
-/// silently reopens exactly the cigs_day bug the gate exists to prevent.
+/// Every design key this build can explain in why[] — read off the tables themselves, never
+/// hand-copied. `Bundle::load` refuses a bundle whose ontology declares a lever with a total effect
+/// that is absent from here, so a second list would fail in the one direction that matters: a key
+/// listed here but missing from the tables passes the gate and silently reopens exactly the
+/// cigs_day bug the gate exists to prevent.
+///
+/// One caveat, precisely: `FACTORS` IS the table `attributions()` walks, so that half cannot drift.
+/// `LIT_LABELS` is only a label lookup over whatever `literature_terms()` emits, so a key added here
+/// and never emitted there would still pass. That is inert today — the gate fires only on keys in
+/// `coefficients.total_effect`, and no literature lever is one — but it is not the same guarantee.
 pub fn surfaced_keys() -> impl Iterator<Item = &'static str> {
     FACTORS.iter().chain(LIT_LABELS.iter()).map(|(k, _)| *k)
 }

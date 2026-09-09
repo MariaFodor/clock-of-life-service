@@ -377,6 +377,62 @@ fn recommendations_rank_and_scope() {
     });
 }
 
+/// A recommendation prices the whole exposure, and an exposure is a signed sum — not a pile of
+/// magnitudes. cigs_day is z-scored against the whole-cohort mean (2.617/day, smokers and never-
+/// smokers together), so a smoker BELOW that mean gets a positive cigs_day delta. Summing absolute
+/// values booked that benefit as harm and overstated what quitting is worth, by 14% on the light
+/// smoker below, to exactly the smokers it is worth least to. Both directions are pinned: the
+/// light smoker (companion points the other way) and the heavy one (companion agrees), because the
+/// buggy and the correct arithmetic are indistinguishable whenever the signs happen to agree.
+#[test]
+fn recommendation_prices_the_signed_exposure_not_a_pile_of_magnitudes() {
+    RT.block_on(async {
+    let smoker = |cigs: f64| json!({"country": "RO", "age": 55, "sex": "M", "smoke": 2,
+                                    "cigs_day": cigs, "pa_min": 0, "sleep": 9, "waist": 115,
+                                    "diabetes": true, "high_bp": true});
+
+    let exposure = |why: &serde_json::Value| -> (f64, f64) {
+        let arr = why.as_array().expect("why[] array");
+        let get = |k: &str| arr.iter().find(|a| a["key"] == k)
+            .map(|a| a["delta_years"].as_f64().unwrap()).unwrap_or(0.0);
+        (get("smk_current"), get("cigs_day"))
+    };
+    let impact = |recs: &serde_json::Value| -> f64 {
+        recs.as_array().expect("recs array").iter()
+            .find(|r| r["feature"] == "smk_current").expect("the smoking rule fires")
+            ["impact_years"].as_f64().unwrap()
+    };
+
+    // Light: 1 cigarette a day is well below the cohort mean, so the dose reads as a small credit.
+    let s = state().await;
+    let why = body_json(call(&s, post("/api/estimate", smoker(1.0))).await).await;
+    let (current, dose) = exposure(&why["why"]);
+    assert!(dose > 0.0, "1 cig/day is below the cohort mean, so cigs_day must be a credit: {dose}");
+    let recs = body_json(call(&s, post("/api/recommendations", smoker(1.0))).await).await;
+    assert!((impact(&recs) - (current + dose).abs()).abs() < 0.051,
+            "impact_years must be |{current} + {dose}| = {}, got {} (summing |.| gives {})",
+            (current + dose).abs(), impact(&recs), current.abs() + dose.abs());
+
+    // Heavy: the dose agrees in sign, and the two arithmetics coincide — this arm exists so the
+    // fix cannot be "always subtract the companion".
+    let why = body_json(call(&s, post("/api/estimate", smoker(20.0))).await).await;
+    let (current, dose) = exposure(&why["why"]);
+    assert!(dose < 0.0, "20 cigs/day must be harm: {dose}");
+    let recs = body_json(call(&s, post("/api/recommendations", smoker(20.0))).await).await;
+    assert!((impact(&recs) - (current + dose).abs()).abs() < 0.051,
+            "impact_years must be |{current} + {dose}|, got {}", impact(&recs));
+
+    // A rule whose feature declares no companions is untouched: its impact is its own |delta|.
+    let hyp = body_json(call(&s, post("/api/recommendations", smoker(20.0))).await).await;
+    let hyp_impact = hyp.as_array().unwrap().iter().find(|r| r["feature"] == "high_bp")
+        .expect("the hypertension rule fires")["impact_years"].as_f64().unwrap();
+    let why_bp = why["why"].as_array().unwrap().iter().find(|a| a["key"] == "high_bp")
+        .expect("high_bp explains itself")["delta_years"].as_f64().unwrap();
+    assert!((hyp_impact - why_bp.abs()).abs() < 1e-9,
+            "a companion-less rule must be unchanged: {hyp_impact} vs {}", why_bp.abs());
+    });
+}
+
 /// DB3: What-If without a base is a pure overlay — nothing persisted, no auth required.
 #[test]
 fn whatif_overlay_only_when_no_base() {
