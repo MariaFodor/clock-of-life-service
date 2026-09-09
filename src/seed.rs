@@ -186,12 +186,12 @@ async fn seed_recommendation_rules(pool: &PgPool) -> Result<(), sqlx::Error> {
     for r in &rules {
         sqlx::query(
             "INSERT INTO recommendation_rule
-                 (code, feature_key, condition, message, priority, evidence_citation, active)
-             VALUES ($1, $2, $3, $4, $5, $6, true)
+                 (code, feature_key, condition, message, priority, evidence_citation, active, managed)
+             VALUES ($1, $2, $3, $4, $5, $6, true, true)
              ON CONFLICT (code) DO UPDATE SET
                  feature_key = EXCLUDED.feature_key, condition = EXCLUDED.condition,
                  message = EXCLUDED.message, priority = EXCLUDED.priority,
-                 evidence_citation = EXCLUDED.evidence_citation, active = true",
+                 evidence_citation = EXCLUDED.evidence_citation, active = true, managed = true",
         )
         .bind(&r.code)
         .bind(&r.feature_key)
@@ -202,6 +202,42 @@ async fn seed_recommendation_rules(pool: &PgPool) -> Result<(), sqlx::Error> {
         .execute(pool)
         .await?;
     }
+
+    // Reconciliation means matching desired state in BOTH directions. Upserting only meant a rule
+    // removed from the seed stayed active for ever — which is how `review_long_sleep` kept being
+    // recommended after ONT-01 demoted long sleep to a marker that must never be advised.
+    // Only rows the seed OWNS are withdrawn. An admin-authored rule is not ours to retire:
+    // deactivating it on restart would be a silent, unaudited deletion of someone else's work.
+    // Ownership is a column, not a name prefix — the earlier `Rtest%` carve-out matched only what
+    // the test suite happens to call its fixtures, so the suite could not have caught the bug.
+    let keep: Vec<String> = rules.iter().map(|r| r.code.clone()).collect();
+    // The withdrawal and its audit row commit together: a crash between them would leave exactly
+    // the unaudited deactivation this change exists to prevent.
+    let mut tx = pool.begin().await?;
+    let withdrawn: Vec<String> = sqlx::query_scalar(
+        "UPDATE recommendation_rule SET active = false
+         WHERE active AND managed AND code <> ALL($1)
+         RETURNING code",
+    )
+    .bind(&keep)
+    .fetch_all(&mut *tx)
+    .await?;
+    for code in &withdrawn {
+        sqlx::query(
+            "INSERT INTO audit_event (admin_id, entity, entity_id, action, citation)
+             VALUES (NULL, 'recommendation_rule', $1, 'deactivate',
+                     'startup reconciliation: rule removed from the seed')",
+        )
+        .bind(code)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    for code in &withdrawn {
+        // Every decision the system makes on its own leaves a trace naming what it did and why.
+        eprintln!("[reconcile] withdrew seed rule '{code}': no longer in the desired state");
+    }
+    
     Ok(())
 }
 

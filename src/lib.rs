@@ -134,6 +134,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/openapi.json", get(openapi_route))
         .route("/api/meta", get(meta))
         .route("/api/questions", get(questions_route))
+        .route("/api/ontology", get(ontology_route))
         .route("/api/references", get(references_route))
         .route("/api/locations", get(locations_route))
         .route("/api/aggregates", get(aggregates_route))
@@ -1091,6 +1092,19 @@ async fn post_answers_route(
             })?;
     }
     Ok(Json(json!({ "saved": req.answers.len() })))
+}
+
+/// The model's ontology: what each factor is, how it is classified, which article backs it, and
+/// the causal graph the fit was constrained by. Public, because it is the evidence behind every
+/// number the product shows — the web renders the graph and the article links straight from it.
+async fn ontology_route(State(s): State<Arc<AppState>>) -> Result<Json<serde_json::Value>, ApiError> {
+    if s.bundle.ontology.is_null() {
+        return Err(ApiError::new(
+            StatusCode::NOT_FOUND,
+            "this model bundle ships no ontology (pre-v3.0.0)".to_string(),
+        ));
+    }
+    Ok(Json(s.bundle.ontology.clone()))
 }
 
 /// Read back the current answers for the authenticated caller's profile.

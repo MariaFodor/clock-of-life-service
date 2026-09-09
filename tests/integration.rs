@@ -11,7 +11,7 @@ use std::sync::{Arc, LazyLock};
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use clock_of_life_service::{build_router, init_state, AppState};
+use clock_of_life_service::{build_router, init_state, seed, AppState};
 use serde_json::{json, Value};
 use tokio::sync::OnceCell;
 use tower::ServiceExt; // for `oneshot`
@@ -41,7 +41,7 @@ async fn state() -> Arc<AppState> {
             if std::env::var("JWT_SECRET").is_err() {
                 std::env::set_var("JWT_SECRET", "integration-test-secret");
             }
-            let s = init_state("bundle/model-v2.2.0", &test_db_url())
+            let s = init_state("bundle/model-v3.0.0", &test_db_url())
                 .await
                 .expect("init_state (is PostgreSQL running and clock_of_life_test present?)");
             sqlx::query("TRUNCATE scenario, calculation, answer RESTART IDENTITY CASCADE")
@@ -173,7 +173,7 @@ fn seeds_are_reconciled() {
     // Recommendation rules (API-02): all seeded, evidence-cited, referencing real features.
     let rules: i64 = sqlx::query_scalar("SELECT count(*) FROM recommendation_rule WHERE active AND code NOT LIKE 'Rtest%'")
         .fetch_one(&s.pool).await.unwrap();
-    assert_eq!(rules, 11, "11 recommendation rules seeded (7 + the 4 literature levers, LEV-03)");
+    assert_eq!(rules, 10, "10 recommendation rules seeded (review_long_sleep dropped: ONT-01 made long sleep a marker, and a marker is never recommended)");
     let uncited: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM recommendation_rule WHERE evidence_citation IS NULL OR evidence_citation = ''",
     ).fetch_one(&s.pool).await.unwrap();
@@ -265,7 +265,7 @@ fn estimate_why_and_context_not_recommended() {
     let est = body_json(resp).await;
 
     // model provenance block.
-    assert_eq!(est["model"]["version"], "2.2.0");
+    assert_eq!(est["model"]["version"], "3.0.0");
     assert!(est["model"]["algorithm"].as_str().is_some());
     // why[] present, populated, each entry well-formed and sensibly signed.
     let why = est["why"].as_array().expect("why[] present");
@@ -577,7 +577,7 @@ fn admin_model_pin() {
     // Restore the real active model and remove the test row (shared DB). The restore must be
     // asserted: a silent 404 here (as with the stale "2.0.0" pin this replaced) leaves the DB with
     // zero active models and makes unrelated tests fail by ordering (REVIEW-2026-09-09 S12).
-    let restore = call(&s, post_auth("/api/admin/model/pin", json!({"semver": "2.2.0", "citation": "ops: restore"}), &admin)).await;
+    let restore = call(&s, post_auth("/api/admin/model/pin", json!({"semver": "3.0.0", "citation": "ops: restore"}), &admin)).await;
     assert_eq!(restore.status(), StatusCode::OK, "restoring the active model must succeed");
     sqlx::query("DELETE FROM model_version WHERE semver = '2.0.0-test'").execute(&s.pool).await.unwrap();
     });
@@ -802,7 +802,8 @@ fn openapi_lists_all_routes() {
     let paths = doc["paths"].as_object().expect("paths object");
     for p in [
         "/health", "/api/meta", "/api/openapi.json", "/api/auth/register", "/api/auth/login",
-        "/api/questions", "/api/references", "/api/locations", "/api/aggregates",
+        "/api/questions",
+        "/api/ontology", "/api/references", "/api/locations", "/api/aggregates",
         "/api/estimate", "/api/recommendations", "/api/whatif", "/api/relocate",
         "/api/calculations", "/api/answers", "/api/profile", "/api/profile/location",
         "/api/account/export", "/api/account",
@@ -1150,30 +1151,60 @@ fn admin_question_codes_are_safe() {
 }
 
 /// REVIEW-2026-09-09 S4 + PR#1 F2/F3/F4: any bundle the scorer can't fully use is refused at load
-/// (fail closed) instead of panicking inside the estimate handler. Every refusal arm is pinned:
-/// the two vendored older bundles are real fixtures; the categorical/unknown-kind arms use
-/// synthetic bundles written to a temp dir.
+/// (fail closed) instead of panicking inside the estimate handler. Every refusal arm is pinned by
+/// a synthetic bundle written to a temp dir — the vendored older bundles that used to serve as
+/// fixtures are gone, and a test should not depend on which artifacts happen to sit in the repo.
 #[test]
 fn incompatible_bundle_refused_at_load() {
-    // v2.0.0 predates bmi/cigs_day/sbp -> design-standardizer arm.
-    let err = clock_of_life_service::bundle::Bundle::load(std::path::Path::new("bundle/model-v2.0.0"))
-        .err()
-        .expect("v2.0.0 bundle must be refused");
+    // Synthetic fixtures rather than vendored dead bundles: the historical v2.0.0/v2.1.0 copies
+    // existed only to be refused, so ONT-04 deleted them and the test builds what it needs. Each
+    // variant strips exactly one thing the scoring design requires.
+    let good: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string("bundle/model-v3.0.0/coefficients.json").unwrap(),
+    )
+    .unwrap();
+
+    let load_with = |patch: &dyn Fn(&mut serde_json::Value), tag: &str| -> String {
+        let mut coefs = good.clone();
+        patch(&mut coefs);
+        let dir = std::env::temp_dir().join(format!("clock-incompat-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("manifest.json"),
+            serde_json::json!({"version": "0.0.0-test", "algorithm": "cox_ph",
+                               "countries": [], "checksums": {}})
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(dir.join("coefficients.json"), coefs.to_string()).unwrap();
+        let err = clock_of_life_service::bundle::Bundle::load(&dir)
+            .err()
+            .unwrap_or_else(|| panic!("bundle variant '{tag}' must be refused"));
+        std::fs::remove_dir_all(&dir).ok();
+        err
+    };
+
+    // A standardizer the scoring design needs is gone -> design arm.
+    let err = load_with(&|c| { c["standardizer"].as_object_mut().unwrap().remove("waist"); }, "no-waist");
     assert!(err.contains("standardizer is missing"), "got: {err}");
 
-    // v2.1.0 ships a literature block without diet/sedentary/stress standardizers -> literature arm.
-    let err = clock_of_life_service::bundle::Bundle::load(std::path::Path::new("bundle/model-v2.1.0"))
-        .err()
-        .expect("v2.1.0 bundle must be refused (rollback to it is intentionally impossible)");
+    // A continuous literature lever without its standardizer -> literature arm.
+    let err = load_with(&|c| { c["standardizer"].as_object_mut().unwrap().remove("diet"); }, "no-diet-std");
     assert!(err.contains("literature lever"), "got: {err}");
+
+    // A prediction coefficient the design never emits would be silently scored as zero — this is
+    // the gate that made the old v2.2.0 bundle (bmi = -1.006 per SD) unloadable rather than quietly
+    // mis-scored, and deleting that bundle removed the only thing exercising it.
+    let err = load_with(&|c| { c["prediction"]["bmi"] = serde_json::json!(-1.006); }, "orphan-bmi");
+    assert!(err.contains("never emits"), "got: {err}");
 }
 
 /// PR#1 F4: the remaining literature-gate arms, on synthetic bundles. Each variant patches the good
-/// v2.2.0 coefficients and must be refused with a message naming the reason.
+/// v3.0.0 coefficients and must be refused with a message naming the reason.
 #[test]
 fn literature_gate_refuses_each_malformed_variant() {
     let good: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string("bundle/model-v2.2.0/coefficients.json").unwrap(),
+        &std::fs::read_to_string("bundle/model-v3.0.0/coefficients.json").unwrap(),
     )
     .unwrap();
 
@@ -1256,5 +1287,131 @@ fn literature_levers_surface_everywhere() {
         assert!(!["alcohol", "diet", "sedentary", "stress"].contains(&r["feature"].as_str().unwrap()),
                 "unanswered levers must not be recommended");
     }
+    });
+}
+
+/// The seeds and the shipped ontology must agree on every factor's role. They disagreed after ONT-04
+/// — the service quoted `sleep_long` as a marker in why[] and recommended it as a lever in the same
+/// response cycle — so this pins them together rather than trusting them to stay in step.
+#[test]
+fn seed_roles_match_the_shipped_ontology() {
+    let ont: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string("bundle/model-v3.0.0/ontology.json").unwrap(),
+    )
+    .unwrap();
+    let feats: Vec<serde_json::Value> = serde_json::from_str(
+        &std::fs::read_to_string("seeds/features.json").unwrap(),
+    )
+    .unwrap();
+    for f in &feats {
+        let key = f["key"].as_str().unwrap();
+        if let Some(role) = ont.get(key).and_then(|s| s["role"].as_str()) {
+            assert_eq!(f["role"].as_str().unwrap(), role,
+                       "seed role for {key} disagrees with the shipped ontology");
+        }
+    }
+
+    // And nothing classified as a marker may carry a recommendation rule: the ontology says such a
+    // factor explains but is never advised.
+    let rules: Vec<serde_json::Value> = serde_json::from_str(
+        &std::fs::read_to_string("seeds/recommendation_rules.json").unwrap(),
+    )
+    .unwrap();
+    for r in &rules {
+        let key = r["feature_key"].as_str().unwrap();
+        let role = ont.get(key).and_then(|s| s["role"].as_str()).unwrap_or("lever");
+        assert_ne!(role, "marker",
+                   "rule {} recommends {key}, which the ontology classifies as a marker",
+                   r["code"].as_str().unwrap());
+    }
+}
+
+/// An admin-authored rule must survive startup reconciliation.
+///
+/// Reconciliation withdraws rules that leave the seed — necessary, or a retracted rule fires for
+/// ever. The first version keyed that on a name prefix, which silently deactivated every rule an
+/// admin created through /api/admin/rules, unaudited. Ownership is a column now, and this pins it.
+#[test]
+fn reconciliation_spares_admin_authored_rules() {
+    RT.block_on(async {
+    let s = state().await;
+    let code = format!("Rtest_admin_{}", std::process::id());
+    // Defensive: a previous run that failed mid-test would otherwise leave this row behind.
+    sqlx::query("DELETE FROM recommendation_rule WHERE code LIKE 'Rtest_admin_%' OR code LIKE 'Rtest_withdrawn_%'")
+        .execute(&s.pool).await.ok();
+    // Two protections, because a failed assert skips the cleanup at the end. The condition NEVER
+    // matches a real profile, so the content tests stay correct; and the name carries the Rtest
+    // prefix every aggregate carve-out already excludes, so the count tests do too — the earlier
+    // Radmin_ name was visible to them for one run after any failure.
+    sqlx::query(
+        "INSERT INTO recommendation_rule
+             (code, feature_key, condition, message, priority, evidence_citation, active, managed)
+         VALUES ($1, 'waist', '{\"field\":\"smoke\",\"op\":\"eq\",\"value\":99}',
+                 'admin-authored advice', 40, 'ops: manual', true, false)
+         ON CONFLICT (code) DO UPDATE SET active = true, managed = false",
+    )
+    .bind(&code)
+    .execute(&s.pool)
+    .await
+    .unwrap();
+
+    // Reconcile again, exactly as a restart would.
+    seed::reconcile(&s.pool, &s.bundle.manifest, "bundle/model-v3.0.0").await.unwrap();
+
+    let still_active: bool = sqlx::query_scalar("SELECT active FROM recommendation_rule WHERE code = $1")
+        .bind(&code)
+        .fetch_one(&s.pool)
+        .await
+        .unwrap();
+    assert!(still_active, "reconciliation must not retire a rule an admin authored");
+
+    // And a seed-owned rule that has left the seed IS withdrawn, and the withdrawal is audited.
+    let gone = format!("Rtest_withdrawn_{}", std::process::id());
+    sqlx::query(
+        "INSERT INTO recommendation_rule
+             (code, feature_key, condition, message, priority, evidence_citation, active, managed)
+         VALUES ($1, 'waist', '{\"field\":\"smoke\",\"op\":\"eq\",\"value\":99}',
+                 'was seeded once', 40, 'seed', true, true)
+         ON CONFLICT (code) DO UPDATE SET active = true, managed = true",
+    )
+    .bind(&gone)
+    .execute(&s.pool)
+    .await
+    .unwrap();
+    seed::reconcile(&s.pool, &s.bundle.manifest, "bundle/model-v3.0.0").await.unwrap();
+    let active: bool = sqlx::query_scalar("SELECT active FROM recommendation_rule WHERE code = $1")
+        .bind(&gone).fetch_one(&s.pool).await.unwrap();
+    assert!(!active, "a seed-owned rule missing from the seed must be withdrawn");
+    let audited: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM audit_event WHERE entity = 'recommendation_rule'
+           AND entity_id = $1 AND action = 'deactivate'")
+        .bind(&gone).fetch_one(&s.pool).await.unwrap();
+    assert!(audited > 0, "the withdrawal must leave an audit trail");
+
+    sqlx::query("DELETE FROM audit_event WHERE entity_id = ANY($1)")
+        .bind(&vec![code.clone(), gone.clone()]).execute(&s.pool).await.ok();
+    sqlx::query("DELETE FROM recommendation_rule WHERE code = ANY($1)")
+        .bind(&vec![code, gone]).execute(&s.pool).await.unwrap();
+    });
+}
+
+/// What-If must refuse `sleep` with a reason rather than returning a confident zero.
+#[test]
+fn whatif_refuses_sleep_with_a_reason() {
+    RT.block_on(async {
+    let s = state().await;
+    let base = json!({"country": "RO", "age": 60, "sex": "M", "smoke": 0, "pa_min": 600,
+                      "sleep": 9.5, "waist": 95});
+    let resp = call(&s, post("/api/whatif", json!({"base": base, "changes": {"sleep": 7.0}}))).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = body_json(resp).await;
+    let msg = body["error"].as_str().unwrap();
+    assert!(msg.contains("marker"), "the refusal must say why, got: {msg}");
+
+    // But a client that submits its whole slider set with sleep UNCHANGED is asking a valid
+    // question about the other levers, and must get an answer rather than a refusal.
+    let resp = call(&s, post("/api/whatif",
+        json!({"base": base, "changes": {"smoke": 0, "sleep": 9.5}}))).await;
+    assert_eq!(resp.status(), StatusCode::OK, "unchanged sleep must not refuse the scenario");
     });
 }

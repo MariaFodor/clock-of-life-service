@@ -31,7 +31,7 @@ cargo test
   loader), `db.rs` (pool, migrations, queries), `seed.rs` (startup reconciliation), `main.rs` (binary).
 - `migrations/` — SQLx migrations (the full 11-table schema).
 - `seeds/` — desired-state `feature` and `question` reference data seeded on startup.
-- `bundle/model-v2.0.0/` — vendored model artifact (coefficients, per-country baselines, evidence)
+- `bundle/model-v3.0.0/` — vendored model artifact (coefficients, per-country baselines, evidence)
   loaded at startup; produced by `clock-of-life-model`.
 
 ## Endpoints
@@ -39,6 +39,7 @@ cargo test
 - `GET /api/openapi.json` — OpenAPI 3.0 contract (source for the web client) *(public)*
 - `GET /api/meta` — active model version + provenance
 - `GET /api/questions` — the 24-question interview definition *(public)*
+- `GET /api/ontology` — the model's ontology: each factor's role, the causal graph, and a verified article link. Public.
 - `GET /api/references` — evidence studies (openable DOIs / reviews); `?feature=<key>` or `?rule=<code>` *(public)*
 - `GET /api/locations` — locations with PM2.5 / greenspace *(public)*
 - `POST /api/auth/register` — create an account (`email` + `password` ≥ 8); returns a bearer token
