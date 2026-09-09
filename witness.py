@@ -19,7 +19,8 @@ checks = []
 
 
 def check(name, ok, detail=""):
-    checks.append((name, ok, detail))
+    # Coerce to a real bool: callers pass truthy values (ids, dicts), and the summary sums these.
+    checks.append((name, bool(ok), detail))
     print(f"  [{'PASS' if ok else 'FAIL'}] {name}" + (f" — {detail}" if detail else ""))
 
 
@@ -28,9 +29,20 @@ def get(path):
         return r.status, json.loads(r.read())
 
 
-def post(path, body):
-    req = urllib.request.Request(BASE + path, data=json.dumps(body).encode(),
-                                 headers={"Content-Type": "application/json"})
+def post(path, body, token=None):
+    headers = {"Content-Type": "application/json"}
+    if token:
+        headers["Authorization"] = "Bearer " + token
+    req = urllib.request.Request(BASE + path, data=json.dumps(body).encode(), headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return r.status, json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode()
+
+
+def get_auth(path, token):
+    req = urllib.request.Request(BASE + path, headers={"Authorization": "Bearer " + token})
     try:
         with urllib.request.urlopen(req, timeout=5) as r:
             return r.status, json.loads(r.read())
@@ -92,6 +104,106 @@ def main():
         # input validation -> 400
         s, _ = post("/api/estimate", {**ro, "pa_min": -5})
         check("bad input -> 400", s == 400, str(s))
+
+        # ── Bundle 7 (LEV): every answered lever reaches the number, the explanation, the overlay
+        # and the advice — and an unanswered one changes nothing. ──────────────────────────────
+        plain = {"country": "RO", "age": 55, "sex": "M", "smoke": 0, "pa_min": 600,
+                 "sleep": 7, "waist": 95}
+        _, base_est = post("/api/estimate", plain)
+        base_years = base_est["estimate_years"]
+
+        # 1. Unanswered levers and answers at their centring reference are the same number.
+        at_reference = {**plain, "diet_score": 2.5, "sitting_hours": 6.0,
+                        "stress_score": 6.11, "alcohol": "light"}
+        _, ref_est = post("/api/estimate", at_reference)
+        check("levers: unanswered == answered-at-reference (national anchoring holds)",
+              ref_est["estimate_years"] == base_years,
+              f'{ref_est["estimate_years"]} vs {base_years}')
+
+        # 2. Each lever moves the estimate in the direction the evidence says.
+        def years(extra):
+            _, e = post("/api/estimate", {**plain, **extra})
+            return e["estimate_years"]
+
+        check("lever: heavy drinking costs years vs abstaining",
+              years({"alcohol": "heavy"}) < years({"alcohol": "none"}),
+              f'{years({"alcohol": "heavy"})} < {years({"alcohol": "none"})}')
+        check("lever: a better diet outlives a worse one",
+              years({"diet_score": 5}) > years({"diet_score": 0}),
+              f'{years({"diet_score": 5})} > {years({"diet_score": 0})}')
+        check("lever: heavy sitting costs years", years({"sitting_hours": 12}) < base_years)
+        check("lever: high perceived stress costs years", years({"stress_score": 16}) < base_years)
+        check("context: mobility difficulty lowers the estimate", years({"mobility": 1}) < base_years)
+        check("env: a polluted, grey location costs years vs a clean, green one",
+              years({"pm25": 25, "ndvi": 0.3}) < years({"pm25": 8, "ndvi": 0.7}))
+
+        # 3. The levers explain themselves (why[]) at their real evidence grade.
+        risky = {**plain, "alcohol": "heavy", "diet_score": 0, "sitting_hours": 12,
+                 "stress_score": 14}
+        _, risky_est = post("/api/estimate", risky)
+        why = {w["key"]: w for w in risky_est["why"]}
+        check("why[]: all four literature levers explain themselves",
+              {"alcohol", "diet", "sedentary", "stress"} <= set(why),
+              ", ".join(sorted(why)))
+        check("why[]: each lever costs years and cites its evidence",
+              all(why[k]["delta_years"] < 0 and why[k]["citation"]
+                  for k in ("alcohol", "diet", "sedentary", "stress")))
+        check("why[]: stress is shown at its honest (weak) grade",
+              why["stress"]["evidence"] == "weak", why["stress"]["evidence"])
+
+        # 4. What-If prices them, and agrees with scoring them directly.
+        _, wi = post("/api/whatif", {"base": risky,
+                                     "changes": {"alcohol": "none", "diet_score": 5,
+                                                 "sitting_hours": 4, "stress_score": 4}})
+        _, improved = post("/api/estimate", {**risky, "alcohol": "none", "diet_score": 5,
+                                             "sitting_hours": 4, "stress_score": 4})
+        direct = round(improved["estimate_years"] - risky_est["estimate_years"], 1)
+        check("what-if: improving every lever adds years", wi["delta_years"] > 1.0,
+              f'+{wi["delta_years"]}')
+        check("what-if: the overlay agrees with scoring the change directly",
+              abs(wi["delta_years"] - direct) <= 0.3, f'{wi["delta_years"]} vs {direct}')
+
+        # 5. The advice targets them, with openable references — and never on an unanswered lever.
+        _, recs = post("/api/recommendations", risky)
+        by_feature = {r["feature"]: r for r in recs}
+        check("recommendations: all four levers are actionable advice",
+              {"alcohol", "diet", "sedentary", "stress"} <= set(by_feature),
+              ", ".join(sorted(by_feature)))
+        check("recommendations: each carries at least one openable study",
+              all(by_feature[f]["references"] for f in ("alcohol", "diet", "sedentary", "stress")))
+        _, plain_recs = post("/api/recommendations", plain)
+        check("recommendations: an unanswered lever is never recommended",
+              not ({"alcohol", "diet", "sedentary", "stress"} & {r["feature"] for r in plain_recs}))
+
+        # 6. The full interview round-trips: register -> save every answer -> read them back.
+        email = f"witness-{int(time.time())}@example.com"
+        s, auth = post("/api/auth/register", {"email": email, "password": "witness-probe-pw"})
+        token = auth.get("token") if s == 200 else None
+        check("account: register returns a bearer token", bool(token), str(s))
+        answers = [
+            {"question_code": "Q1_age", "value": 55},
+            {"question_code": "Q5_smoking", "value": "never"},
+            {"question_code": "Q18_alcohol", "value": "heavy"},
+            {"question_code": "Q19_stress", "value": [3, 1, 1, 3]},   # PSS-4 battery
+            {"question_code": "Q20_mood", "value": [1, 0]},           # PHQ-2 battery
+            {"question_code": "Q23_location", "value": {"name": "Cluj-Napoca", "country": "RO"}},
+        ]
+        s, saved = post("/api/answers", {"answers": answers}, token)
+        check("interview: every answer shape the web sends is accepted",
+              s == 200 and saved.get("saved") == len(answers), str(saved))
+        # The second run is the witness: read the state back, not just write it.
+        s, back = get_auth("/api/answers", token)
+        stored = {a["question_code"]: a["value"] for a in back} if s == 200 else {}
+        check("interview: answers read back identically (batteries stay arrays)",
+              stored.get("Q19_stress") == [3, 1, 1, 3] and stored.get("Q20_mood") == [1, 0],
+              str(stored.get("Q19_stress")))
+        check("interview: the location answer keeps its object shape",
+              (stored.get("Q23_location") or {}).get("name") == "Cluj-Napoca")
+        s, _ = post("/api/profile/location", {"name": "Cluj-Napoca", "country": "RO"}, token)
+        check("interview: the home location is accepted", s == 200, str(s))
+        s, profile = get_auth("/api/profile", token)
+        check("interview: the home location reads back on the profile",
+              s == 200 and profile.get("home_location_id"), str(s))
 
         return finish()
     finally:
