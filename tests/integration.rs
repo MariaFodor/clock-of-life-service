@@ -11,7 +11,7 @@ use std::sync::{Arc, LazyLock};
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use clock_of_life_service::{build_router, init_state, AppState};
+use clock_of_life_service::{build_router, init_state, seed, AppState};
 use serde_json::{json, Value};
 use tokio::sync::OnceCell;
 use tower::ServiceExt; // for `oneshot`
@@ -1318,4 +1318,81 @@ fn seed_roles_match_the_shipped_ontology() {
                    "rule {} recommends {key}, which the ontology classifies as a marker",
                    r["code"].as_str().unwrap());
     }
+}
+
+/// An admin-authored rule must survive startup reconciliation.
+///
+/// Reconciliation withdraws rules that leave the seed — necessary, or a retracted rule fires for
+/// ever. The first version keyed that on a name prefix, which silently deactivated every rule an
+/// admin created through /api/admin/rules, unaudited. Ownership is a column now, and this pins it.
+#[test]
+fn reconciliation_spares_admin_authored_rules() {
+    RT.block_on(async {
+    let s = state().await;
+    let code = format!("Radmin_{}", std::process::id());
+    sqlx::query(
+        "INSERT INTO recommendation_rule
+             (code, feature_key, condition, message, priority, evidence_citation, active, managed)
+         VALUES ($1, 'waist', '{\"field\":\"waist\",\"op\":\"gt\",\"value\":100}',
+                 'admin-authored advice', 40, 'ops: manual', true, false)
+         ON CONFLICT (code) DO UPDATE SET active = true, managed = false",
+    )
+    .bind(&code)
+    .execute(&s.pool)
+    .await
+    .unwrap();
+
+    // Reconcile again, exactly as a restart would.
+    seed::reconcile(&s.pool, &s.bundle.manifest, "bundle/model-v3.0.0").await.unwrap();
+
+    let still_active: bool = sqlx::query_scalar("SELECT active FROM recommendation_rule WHERE code = $1")
+        .bind(&code)
+        .fetch_one(&s.pool)
+        .await
+        .unwrap();
+    assert!(still_active, "reconciliation must not retire a rule an admin authored");
+
+    // And a seed-owned rule that has left the seed IS withdrawn, and the withdrawal is audited.
+    let gone = format!("Rtest_withdrawn_{}", std::process::id());
+    sqlx::query(
+        "INSERT INTO recommendation_rule
+             (code, feature_key, condition, message, priority, evidence_citation, active, managed)
+         VALUES ($1, 'waist', '{\"field\":\"waist\",\"op\":\"gt\",\"value\":100}',
+                 'was seeded once', 40, 'seed', true, true)
+         ON CONFLICT (code) DO UPDATE SET active = true, managed = true",
+    )
+    .bind(&gone)
+    .execute(&s.pool)
+    .await
+    .unwrap();
+    seed::reconcile(&s.pool, &s.bundle.manifest, "bundle/model-v3.0.0").await.unwrap();
+    let active: bool = sqlx::query_scalar("SELECT active FROM recommendation_rule WHERE code = $1")
+        .bind(&gone).fetch_one(&s.pool).await.unwrap();
+    assert!(!active, "a seed-owned rule missing from the seed must be withdrawn");
+    let audited: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM audit_event WHERE entity = 'recommendation_rule'
+           AND entity_id = $1 AND action = 'deactivate'")
+        .bind(&gone).fetch_one(&s.pool).await.unwrap();
+    assert!(audited > 0, "the withdrawal must leave an audit trail");
+
+    sqlx::query("DELETE FROM audit_event WHERE entity_id = ANY($1)")
+        .bind(&vec![code.clone(), gone.clone()]).execute(&s.pool).await.ok();
+    sqlx::query("DELETE FROM recommendation_rule WHERE code = ANY($1)")
+        .bind(&vec![code, gone]).execute(&s.pool).await.unwrap();
+    });
+}
+
+/// What-If must refuse `sleep` with a reason rather than returning a confident zero.
+#[test]
+fn whatif_refuses_sleep_with_a_reason() {
+    RT.block_on(async {
+    let s = state().await;
+    let base = json!({"country": "RO", "age": 60, "sex": "M", "smoke": 0, "pa_min": 600,
+                      "sleep": 9.5, "waist": 95});
+    let resp = call(&s, post("/api/whatif", json!({"base": base, "changes": {"sleep": 7.0}}))).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = body_json(resp).await;
+    let msg = body["error"].as_str().unwrap();
+    assert!(msg.contains("marker"), "the refusal must say why, got: {msg}");
+    });
 }
