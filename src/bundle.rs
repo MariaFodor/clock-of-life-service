@@ -54,6 +54,12 @@ pub struct Coefficients {
     pub total_effect: HashMap<String, f64>,
     #[serde(default)]
     pub total_effect_sd: HashMap<String, f64>,
+    /// Neutral values for optional inputs, supplied by the model rather than invented here.
+    /// Currently `cigs_day_when_current_smoker`: since the smoking contrast was corrected,
+    /// `smk_current` no longer absorbs dose, so a smoker who skips the dose question must be
+    /// scored at the smokers' mean and not at zero.
+    #[serde(default)]
+    pub conditional_defaults: HashMap<String, f64>,
     /// Pre-v2.2.0 bundles ship this without standardizers/references and are refused by the gate.
     #[serde(default)]
     pub literature: HashMap<String, LiteratureFeature>,
@@ -149,6 +155,11 @@ impl Bundle {
         }
 
         let coefficients: Coefficients = read_json(&dir.join("coefficients.json"))?;
+        // The ontology travels with the model (v3.0.0+): roles, causal edges and verified article
+        // links come from the same file the fit was constrained by, rather than a second copy that
+        // can drift from it. Served verbatim so the web can draw the graph the model actually used.
+        let ontology: serde_json::Value =
+            read_json(&dir.join("ontology.json")).unwrap_or(serde_json::Value::Null);
         // The checksum gate proves integrity, not usability: a bundle whose standardizer lacks a key
         // the scoring design z-scores would panic inside the estimate handler. Refuse it here, at
         // startup, like any other bad bundle (REVIEW-2026-09-09 S4).
@@ -175,6 +186,32 @@ impl Bundle {
                 return Err(format!(
                     "coefficients.json: prediction has coefficient(s) {orphans:?} that the scoring \
                      design never emits — they would be silently ignored. Refusing this bundle."
+                ));
+            }
+        }
+
+        // Every lever the ontology declares must be one this build can actually explain. cigs_day
+        // shipped as a lever with a total effect while being absent from the attribution surface,
+        // so over a year of smoking harm was dropped from why[] and from the ranking — invisibly,
+        // because nothing checked the ontology against the code in this direction.
+        if let Some(ont) = ontology.as_object() {
+            let surfaced: std::collections::HashSet<&str> =
+                crate::scoring::surfaced_keys().collect();
+            let unsurfaced: Vec<&String> = ont
+                .iter()
+                .filter(|(k, v)| {
+                    !k.starts_with('_')
+                        && v.get("role").and_then(|r| r.as_str()) == Some("lever")
+                        && coefficients.total_effect.contains_key(k.as_str())
+                        && !surfaced.contains(k.as_str())
+                })
+                .map(|(k, _)| k)
+                .collect();
+            if !unsurfaced.is_empty() {
+                return Err(format!(
+                    "ontology declares lever(s) {unsurfaced:?} with a total effect that this build \
+                     never surfaces in why[] — their contribution would be silently dropped from \
+                     the breakdown and the ranking. Refusing this bundle."
                 ));
             }
         }
@@ -249,11 +286,7 @@ impl Bundle {
         // Evidence is supplementary (powers the "Why?" citations); tolerate its absence.
         let evidence: HashMap<String, Evidence> =
             read_json(&dir.join("evidence.json")).unwrap_or_default();
-        // The ontology travels with the model (v3.0.0+): roles, causal edges and verified article
-        // links come from the same file the fit was constrained by, rather than a second copy that
-        // can drift from it. Served verbatim so the web can draw the graph the model actually used.
-        let ontology: serde_json::Value =
-            read_json(&dir.join("ontology.json")).unwrap_or(serde_json::Value::Null);
+
         let mut baselines = HashMap::new();
         for iso in &manifest.countries {
             let b: Baseline = read_json(&dir.join("baselines").join(format!("{iso}.json")))?;

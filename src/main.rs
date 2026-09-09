@@ -15,7 +15,7 @@ async fn main() {
         )
         .init();
 
-    let dir = std::env::var("CLOCK_BUNDLE").unwrap_or_else(|_| "bundle/model-v3.0.0".to_string());
+    let dir = std::env::var("CLOCK_BUNDLE").unwrap_or_else(|_| "bundle/model-v3.0.1".to_string());
     let database_url = default_database_url();
 
     let state = init_state(&dir, &database_url).await.unwrap_or_else(|e| {

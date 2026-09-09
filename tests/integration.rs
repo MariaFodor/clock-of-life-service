@@ -41,7 +41,7 @@ async fn state() -> Arc<AppState> {
             if std::env::var("JWT_SECRET").is_err() {
                 std::env::set_var("JWT_SECRET", "integration-test-secret");
             }
-            let s = init_state("bundle/model-v3.0.0", &test_db_url())
+            let s = init_state("bundle/model-v3.0.1", &test_db_url())
                 .await
                 .expect("init_state (is PostgreSQL running and clock_of_life_test present?)");
             sqlx::query("TRUNCATE scenario, calculation, answer RESTART IDENTITY CASCADE")
@@ -152,7 +152,7 @@ fn seeds_are_reconciled() {
     let s = state().await;
     let features: i64 = sqlx::query_scalar("SELECT count(*) FROM feature WHERE active")
         .fetch_one(&s.pool).await.unwrap();
-    assert_eq!(features, 18, "18 features seeded");
+    assert_eq!(features, 19, "19 features seeded (18 + cigs_day: a lever with a total effect that the attribution surface had been missing)");
 
     // Exclude questions created by the admin-mutation test (shared DB, parallel).
     let questions: i64 = sqlx::query_scalar("SELECT count(*) FROM question WHERE active AND code NOT LIKE 'Qtest%'")
@@ -265,7 +265,7 @@ fn estimate_why_and_context_not_recommended() {
     let est = body_json(resp).await;
 
     // model provenance block.
-    assert_eq!(est["model"]["version"], "3.0.0");
+    assert_eq!(est["model"]["version"], "3.0.1");
     assert!(est["model"]["algorithm"].as_str().is_some());
     // why[] present, populated, each entry well-formed and sensibly signed.
     let why = est["why"].as_array().expect("why[] present");
@@ -353,7 +353,10 @@ fn recommendations_rank_and_scope() {
     let recs = body_json(resp).await;
     let arr = recs.as_array().expect("array");
     assert!(!arr.is_empty(), "high-risk profile gets recommendations");
-    // Top recommendation is quitting smoking (highest impact × priority).
+    // Top recommendation is quitting smoking. This briefly ranked below activity, and weakening the
+    // assertion would have hidden the cause rather than fixed it: cigs_day is a lever with a total
+    // effect, but it was missing from FACTORS and the seeds, so over a year of smoking harm was
+    // invisible to the ranker while What-If priced it. The assertion stands; the surface was wrong.
     assert_eq!(arr[0]["feature"], "smk_current");
     // Sorted by descending score; every recommendation is a lever or manage factor (never context).
     for pair in arr.windows(2) {
@@ -371,6 +374,63 @@ fn recommendations_rank_and_scope() {
     let resp = call(&s, post("/api/recommendations", healthy)).await;
     let recs = body_json(resp).await;
     assert_eq!(recs.as_array().unwrap().len(), 0, "healthy profile gets no recommendations");
+    });
+}
+
+/// A recommendation prices the whole exposure, and an exposure is a signed sum — not a pile of
+/// magnitudes. cigs_day is z-scored against the whole-cohort mean (2.617/day, smokers and never-
+/// smokers together), so a smoker BELOW that mean gets a positive cigs_day delta. Summing absolute
+/// values booked that benefit as harm and overstated what quitting is worth, by 14% on the light
+/// smoker below, to exactly the smokers it is worth least to. Both directions are pinned: the
+/// light smoker (companion points the other way) and the heavy one (companion agrees), because the
+/// buggy and the correct arithmetic are indistinguishable whenever the signs happen to agree.
+#[test]
+fn recommendation_prices_the_signed_exposure_not_a_pile_of_magnitudes() {
+    RT.block_on(async {
+    let smoker = |cigs: f64| json!({"country": "RO", "age": 55, "sex": "M", "smoke": 2,
+                                    "cigs_day": cigs, "pa_min": 0, "sleep": 9, "waist": 115,
+                                    "diabetes": true, "high_bp": true});
+
+    let exposure = |why: &serde_json::Value| -> (f64, f64) {
+        let arr = why.as_array().expect("why[] array");
+        let get = |k: &str| arr.iter().find(|a| a["key"] == k)
+            .map(|a| a["delta_years"].as_f64().unwrap()).unwrap_or(0.0);
+        (get("smk_current"), get("cigs_day"))
+    };
+    let impact = |recs: &serde_json::Value| -> f64 {
+        recs.as_array().expect("recs array").iter()
+            .find(|r| r["feature"] == "smk_current").expect("the smoking rule fires")
+            ["impact_years"].as_f64().unwrap()
+    };
+
+    // Light: 1 cigarette a day is well below the cohort mean, so the dose reads as a small credit.
+    let s = state().await;
+    let why = body_json(call(&s, post("/api/estimate", smoker(1.0))).await).await;
+    let (current, dose) = exposure(&why["why"]);
+    assert!(dose > 0.0, "1 cig/day is below the cohort mean, so cigs_day must be a credit: {dose}");
+    let recs = body_json(call(&s, post("/api/recommendations", smoker(1.0))).await).await;
+    // Exact, not approximate: impact_years and the why[] deltas are both rounded to 0.1, so any
+    // real discrepancy is at least 0.1 and a loose tolerance would only hide float slop worth ~1e-16.
+    assert!((impact(&recs) - (current + dose).abs()).abs() < 1e-9,
+            "impact_years must be |{current} + {dose}| = {}, got {} (summing |.| gives {})",
+            (current + dose).abs(), impact(&recs), current.abs() + dose.abs());
+
+    // Heavy: the dose agrees in sign, and the two arithmetics coincide — this arm exists so the
+    // fix cannot be "always subtract the companion".
+    let why = body_json(call(&s, post("/api/estimate", smoker(20.0))).await).await;
+    let (current, dose) = exposure(&why["why"]);
+    assert!(dose < 0.0, "20 cigs/day must be harm: {dose}");
+    let recs = body_json(call(&s, post("/api/recommendations", smoker(20.0))).await).await;
+    assert!((impact(&recs) - (current + dose).abs()).abs() < 1e-9,
+            "impact_years must be |{current} + {dose}|, got {}", impact(&recs));
+
+    // A rule whose feature declares no companions is untouched: its impact is its own |delta|.
+    let hyp_impact = recs.as_array().unwrap().iter().find(|r| r["feature"] == "high_bp")
+        .expect("the hypertension rule fires")["impact_years"].as_f64().unwrap();
+    let why_bp = why["why"].as_array().unwrap().iter().find(|a| a["key"] == "high_bp")
+        .expect("high_bp explains itself")["delta_years"].as_f64().unwrap();
+    assert!((hyp_impact - why_bp.abs()).abs() < 1e-9,
+            "a companion-less rule must be unchanged: {hyp_impact} vs {}", why_bp.abs());
     });
 }
 
@@ -577,7 +637,7 @@ fn admin_model_pin() {
     // Restore the real active model and remove the test row (shared DB). The restore must be
     // asserted: a silent 404 here (as with the stale "2.0.0" pin this replaced) leaves the DB with
     // zero active models and makes unrelated tests fail by ordering (REVIEW-2026-09-09 S12).
-    let restore = call(&s, post_auth("/api/admin/model/pin", json!({"semver": "3.0.0", "citation": "ops: restore"}), &admin)).await;
+    let restore = call(&s, post_auth("/api/admin/model/pin", json!({"semver": "3.0.1", "citation": "ops: restore"}), &admin)).await;
     assert_eq!(restore.status(), StatusCode::OK, "restoring the active model must succeed");
     sqlx::query("DELETE FROM model_version WHERE semver = '2.0.0-test'").execute(&s.pool).await.unwrap();
     });
@@ -1160,7 +1220,7 @@ fn incompatible_bundle_refused_at_load() {
     // existed only to be refused, so ONT-04 deleted them and the test builds what it needs. Each
     // variant strips exactly one thing the scoring design requires.
     let good: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string("bundle/model-v3.0.0/coefficients.json").unwrap(),
+        &std::fs::read_to_string("bundle/model-v3.0.1/coefficients.json").unwrap(),
     )
     .unwrap();
 
@@ -1199,12 +1259,66 @@ fn incompatible_bundle_refused_at_load() {
     assert!(err.contains("never emits"), "got: {err}");
 }
 
+/// The unsurfaced-lever gate, on the REAL ontology. The variants above write no ontology.json, so
+/// `ontology` is Null there and this arm is skipped entirely — the gate shipped with no test at all,
+/// which is how the bug it guards against (cigs_day: a lever with a total effect that why[] never
+/// showed) got in. Both directions are checked: the shipped bundle must load, and a lever the build
+/// cannot explain must be refused.
+#[test]
+fn unsurfaced_lever_refused_at_load() {
+    let coefs = std::fs::read_to_string("bundle/model-v3.0.1/coefficients.json").unwrap();
+    let good_coefs: serde_json::Value = serde_json::from_str(&coefs).unwrap();
+    let good_ont: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string("bundle/model-v3.0.1/ontology.json").unwrap(),
+    )
+    .unwrap();
+
+    let load_with = |coefs: &serde_json::Value, ont: &serde_json::Value, tag: &str| {
+        let dir = std::env::temp_dir().join(format!("clock-unsurfaced-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("manifest.json"),
+            serde_json::json!({"version": "0.0.0-test", "algorithm": "cox_ph",
+                               "countries": [], "checksums": {}})
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(dir.join("coefficients.json"), coefs.to_string()).unwrap();
+        std::fs::write(dir.join("ontology.json"), ont.to_string()).unwrap();
+        let res = clock_of_life_service::bundle::Bundle::load(&dir);
+        std::fs::remove_dir_all(&dir).ok();
+        res
+    };
+
+    // The shipped ontology names 22 factors; every lever among them with a total effect must be one
+    // this build surfaces. If this ever fails, the bundle is unshippable, not the test wrong.
+    load_with(&good_coefs, &good_ont, "real")
+        .unwrap_or_else(|e| panic!("the shipped v3.0.1 bundle must load: {e}"));
+
+    // A lever this build has no label, no attribution and no ranking slot for.
+    let mut ont = good_ont.clone();
+    ont["screen_time"] = serde_json::json!({"role": "lever", "sign": "positive"});
+    let mut coefs = good_coefs.clone();
+    coefs["total_effect"]["screen_time"] = serde_json::json!(0.11);
+    let err = load_with(&coefs, &ont, "fake-lever").err().expect("must be refused");
+    assert!(err.contains("screen_time") && err.contains("never surfaces"), "got: {err}");
+
+    // The gate keys on BOTH conditions, so neither half fires alone: a lever the fit never gave a
+    // total effect has nothing to drop, and a non-lever role is not a recommendation surface.
+    load_with(&good_coefs, &ont, "lever-no-effect")
+        .unwrap_or_else(|e| panic!("a lever without a total effect must load: {e}"));
+    let mut ont_marker = good_ont.clone();
+    ont_marker["screen_time"] = serde_json::json!({"role": "marker", "sign": "positive"});
+    load_with(&coefs, &ont_marker, "non-lever")
+        .unwrap_or_else(|e| panic!("a non-lever with a total effect must load: {e}"));
+}
+
 /// PR#1 F4: the remaining literature-gate arms, on synthetic bundles. Each variant patches the good
-/// v3.0.0 coefficients and must be refused with a message naming the reason.
+/// v3.0.1 coefficients and must be refused with a message naming the reason.
 #[test]
 fn literature_gate_refuses_each_malformed_variant() {
     let good: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string("bundle/model-v3.0.0/coefficients.json").unwrap(),
+        &std::fs::read_to_string("bundle/model-v3.0.1/coefficients.json").unwrap(),
     )
     .unwrap();
 
@@ -1296,7 +1410,7 @@ fn literature_levers_surface_everywhere() {
 #[test]
 fn seed_roles_match_the_shipped_ontology() {
     let ont: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string("bundle/model-v3.0.0/ontology.json").unwrap(),
+        &std::fs::read_to_string("bundle/model-v3.0.1/ontology.json").unwrap(),
     )
     .unwrap();
     let feats: Vec<serde_json::Value> = serde_json::from_str(
@@ -1356,7 +1470,7 @@ fn reconciliation_spares_admin_authored_rules() {
     .unwrap();
 
     // Reconcile again, exactly as a restart would.
-    seed::reconcile(&s.pool, &s.bundle.manifest, "bundle/model-v3.0.0").await.unwrap();
+    seed::reconcile(&s.pool, &s.bundle.manifest, "bundle/model-v3.0.1").await.unwrap();
 
     let still_active: bool = sqlx::query_scalar("SELECT active FROM recommendation_rule WHERE code = $1")
         .bind(&code)
@@ -1378,7 +1492,7 @@ fn reconciliation_spares_admin_authored_rules() {
     .execute(&s.pool)
     .await
     .unwrap();
-    seed::reconcile(&s.pool, &s.bundle.manifest, "bundle/model-v3.0.0").await.unwrap();
+    seed::reconcile(&s.pool, &s.bundle.manifest, "bundle/model-v3.0.1").await.unwrap();
     let active: bool = sqlx::query_scalar("SELECT active FROM recommendation_rule WHERE code = $1")
         .bind(&gone).fetch_one(&s.pool).await.unwrap();
     assert!(!active, "a seed-owned rule missing from the seed must be withdrawn");
@@ -1413,5 +1527,38 @@ fn whatif_refuses_sleep_with_a_reason() {
     let resp = call(&s, post("/api/whatif",
         json!({"base": base, "changes": {"smoke": 0, "sleep": 9.5}}))).await;
     assert_eq!(resp.status(), StatusCode::OK, "unchanged sleep must not refuse the scenario");
+    });
+}
+
+/// A current smoker who skips the dose question must be scored as an average smoker, not as one
+/// who smokes nothing. Before the smoking contrast was corrected, `smk_current` absorbed the dose
+/// and this barely mattered; afterwards, a zero default describes a cell nobody occupies.
+#[test]
+fn a_smoker_who_skips_the_dose_is_scored_as_an_average_smoker() {
+    RT.block_on(async {
+    let s = state().await;
+    let profile = |cigs: Option<f64>| {
+        let mut p = json!({"country": "RO", "age": 55, "sex": "M", "smoke": 2, "pa_min": 600,
+                           "sleep": 7, "waist": 95});
+        if let Some(c) = cigs { p["cigs_day"] = json!(c); }
+        p
+    };
+    let years = |v: serde_json::Value| async {
+        let r = call(&s, post("/api/estimate", v)).await;
+        body_json(r).await["estimate_years"].as_f64().unwrap()
+    };
+    let unstated = years(profile(None)).await;
+    let typical = years(profile(Some(12.0))).await;
+    let heavy = years(profile(Some(40.0))).await;
+
+    // Saying nothing lands near the average smoker.
+    assert!((unstated - typical).abs() < 0.5,
+            "unstated dose {unstated} should score near a typical smoker {typical}");
+    // And a stated dose still moves the number, so the default is a floor, not a ceiling.
+    assert!(heavy < unstated, "40/day {heavy} must score worse than an unstated dose {unstated}");
+
+    // Note: a CURRENT smoker stating 0/day is self-contradictory input, and is treated the same as
+    // not answering. Distinguishing them would need cigs_day to become Option<f64>; the model has
+    // no coefficient for "smokes but smokes nothing" either way.
     });
 }

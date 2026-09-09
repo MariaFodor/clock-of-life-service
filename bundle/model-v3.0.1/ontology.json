@@ -99,12 +99,11 @@
       "title": "Socioeconomic Inequalities in Health in 22 European Countries",
       "first_author": "Mackenbach",
       "year": 2008,
-      "verified": "2026-09-09",
-      "per": "binary"
+      "verified": "2026-09-09"
     },
     "grade": "moderate",
     "clip_expected": true,
-    "clip_reason": "Education's own effect is not detectable in this cohort once the fit is stratified by age and sex (+0.006 unconstrained, i.e. noise pointing the wrong way). The constraint holds it at 0 rather than letting noise read as 'school shortens your life'; it simply drops out of the breakdown."
+    "clip_reason": "Education's own effect is not detectable in this cohort once the fit is stratified by age and sex: +0.0065 +/- 0.050, z = 0.13 \u2014 noise that happens to point the wrong way. The constraint holds it at 0 rather than letting that read as 'school shortens your life'; it drops out of the breakdown. Unlike waist, this is a decision over noise, not over signal."
   },
   "income": {
     "role": "context",
@@ -132,8 +131,7 @@
       "title": "Socioeconomic Inequalities in Health in 22 European Countries",
       "first_author": "Mackenbach",
       "year": 2008,
-      "verified": "2026-09-09",
-      "per": "per_category"
+      "verified": "2026-09-09"
     },
     "grade": "moderate"
   },
@@ -168,7 +166,12 @@
       "per": "binary"
     },
     "study": "smoking-doll-peto",
-    "grade": "strong"
+    "grade": "strong",
+    "companions": [
+      "smk_current",
+      "cigs_day"
+    ],
+    "companion_reason": "Smoking is one categorical exposure: never (reference) / former / current, plus a dose term for current smokers. Former-vs-never only means what Doll 2004 measured when the other indicators are in the model \u2014 otherwise the reference group silently becomes 'everyone else'."
   },
   "smk_current": {
     "role": "lever",
@@ -199,7 +202,8 @@
       "first_author": "Jha",
       "year": 2013,
       "verified": "2026-09-09",
-      "per": "binary"
+      "per": "marginal_current_vs_never",
+      "blend_note": "Not blended: the fitted coefficient conditions on dose, so it estimates a different contrast than this prior. Blending them over-stated every current smoker by about 0.07 log-HR."
     },
     "study": "smoking-cessation",
     "grade": "strong",
@@ -207,7 +211,12 @@
     "waived_confounders": [
       "stress"
     ],
-    "waiver_reason": "Perceived stress is a literature feature with no cohort measurement, so it cannot be adjusted for. Residual confounding by stress would, if anything, inflate the smoking coefficient."
+    "waiver_reason": "Perceived stress is a literature feature with no cohort measurement, so it cannot be adjusted for. Residual confounding by stress would, if anything, inflate the smoking coefficient.",
+    "companions": [
+      "smk_former",
+      "cigs_day"
+    ],
+    "companion_reason": "Fitted alongside smk_former and cigs_day so the reference group is 'never smoked'. Note the consequence: holding cigs_day fixed makes this coefficient 'a current smoker who smokes zero a day', a cell nobody occupies. It is therefore NOT the contrast Jha 2013 measured (current-vs-never at observed doses), which is why the prior is not blended into it."
   },
   "cigs_day": {
     "role": "lever",
@@ -239,7 +248,12 @@
       "per": "per_cigarette_day"
     },
     "study": "smoking-doll-peto",
-    "grade": "strong"
+    "grade": "strong",
+    "companions": [
+      "smk_current",
+      "smk_former"
+    ],
+    "companion_reason": "Smoking is one categorical exposure: never (reference) / former / current, plus a dose term for current smokers. Former-vs-never only means what Doll 2004 measured when the other indicators are in the model \u2014 otherwise the reference group silently becomes 'everyone else'."
   },
   "activity": {
     "role": "lever",
@@ -394,7 +408,7 @@
     ],
     "waiver_reason": "Diet, alcohol and sitting time are literature features: NHANES carries no usable item-level batteries for them, so they cannot enter a cohort-fitted adjustment set. The waist total effect is therefore adjusted for age, sex, smoking, activity and SES but NOT for these three. Recorded so the estimate is read as partially adjusted rather than fully causal.",
     "clip_expected": true,
-    "clip_reason": "In the PREDICTION model \u2014 which conditions on diabetes, blood pressure and mobility, the very paths adiposity acts through \u2014 the direct effect of waist is slightly negative (-0.134). We do not believe adiposity protects anyone, and refuse to show a number that says so, so the sign constraint holds it at 0: waist does not move the headline estimate, while its TOTAL effect (+0.011 from the cohort) is what What-If and the recommendations use. Owner decision, ONT-01 Q3."
+    "clip_reason": "In the PREDICTION model \u2014 which conditions on diabetes, blood pressure and mobility, the very paths adiposity acts through \u2014 the direct effect of waist is negative and PRECISELY estimated: -0.1345 +/- 0.0292, z = -4.6. This is a decision taken over a real signal, not over noise: we do not believe adiposity protects anyone, so the constraint holds it at 0 and waist does not move the headline estimate, while its TOTAL effect (+0.011 from the cohort) is what What-If and the recommendations use. Owner decision, ONT-01 Q3. Note this also changes what waist_x_young means: with the main effect pinned, the interaction carries the young's whole waist effect rather than a difference from it."
   },
   "diet": {
     "role": "lever",
@@ -539,8 +553,7 @@
       "title": "Age-specific relevance of usual blood pressure to vascular mortality",
       "first_author": "Prospective Studies Collaboration",
       "year": 2002,
-      "verified": "2026-09-09",
-      "per": "per_20mmHg"
+      "verified": "2026-09-09"
     }
   },
   "diabetes": {
@@ -603,8 +616,7 @@
       "title": "Age-specific relevance of usual blood pressure to vascular mortality",
       "first_author": "Prospective Studies Collaboration",
       "year": 2002,
-      "verified": "2026-09-09",
-      "per": "binary"
+      "verified": "2026-09-09"
     }
   },
   "respiratory": {
@@ -632,8 +644,7 @@
       "title": "Global burden of COPD: systematic review and meta-analysis",
       "first_author": "Halbert",
       "year": 2006,
-      "verified": "2026-09-09",
-      "per": "binary"
+      "verified": "2026-09-09"
     }
   },
   "mobility": {
@@ -662,8 +673,7 @@
       "title": "Gait Speed and Survival in Older Adults",
       "first_author": "Studenski",
       "year": 2011,
-      "verified": "2026-09-09",
-      "per": "binary"
+      "verified": "2026-09-09"
     },
     "decision": "Classified as MARKER, not context: difficulty walking is downstream evidence of accumulated damage rather than a cause of death, so it predicts and explains but is never recommended or offered in What-If."
   },
@@ -693,8 +703,7 @@
       "title": "Association of Cardiometabolic Multimorbidity With Mortality",
       "first_author": "Di Angelantonio",
       "year": 2015,
-      "verified": "2026-09-09",
-      "per": "binary"
+      "verified": "2026-09-09"
     }
   },
   "cancer_hx": {
@@ -721,8 +730,7 @@
       "title": "Cancer treatment and survivorship statistics, 2019",
       "first_author": "Miller",
       "year": 2019,
-      "verified": "2026-09-09",
-      "per": "binary"
+      "verified": "2026-09-09"
     }
   },
   "env": {

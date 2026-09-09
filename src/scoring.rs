@@ -148,8 +148,22 @@ pub fn design(p: &Profile, coefs: &Coefficients) -> HashMap<String, f64> {
     let mut d = HashMap::new();
     d.insert("smk_former".into(), if p.smoke == 1 { 1.0 } else { 0.0 });
     d.insert("smk_current".into(), smk_current);
-    // Current-smoker dose: 0 for never/former (matches the training encoding in config/features.py).
-    let cigs = if p.smoke == 2 { p.cigs_day } else { 0.0 };
+    // Current-smoker dose: 0 for never/former, matching the training encoding. A CURRENT smoker who
+    // did not answer the dose question is scored at the cohort's smoker mean from the bundle, not at
+    // zero — since the contrast fix, `smk_current` no longer carries dose, so zero would describe a
+    // smoker who smokes nothing (REVIEW S9).
+    let cigs = if p.smoke == 2 {
+        if p.cigs_day > 0.0 {
+            p.cigs_day
+        } else {
+            coefs.conditional_defaults
+                .get("cigs_day_when_current_smoker")
+                .copied()
+                .unwrap_or(0.0)
+        }
+    } else {
+        0.0
+    };
     d.insert("cigs_day".into(), z(cigs, coefs, "cigs_day"));
     // BMI is deliberately NOT scored (REFIT-01). It is ~0.9 correlated with waist, and fitting both
     // let BMI take a large negative coefficient — the shipped model rewarded being heavier. Waist is
@@ -310,11 +324,40 @@ pub struct Attribution {
     pub year: Option<i32>,
 }
 
+/// Every design key this build can explain in why[] — read off the tables themselves, never
+/// hand-copied. `Bundle::load` refuses a bundle whose ontology declares a lever with a total effect
+/// that is absent from here, so a second list would fail in the one direction that matters: a key
+/// listed here but missing from the tables passes the gate and silently reopens exactly the
+/// cigs_day bug the gate exists to prevent.
+///
+/// One caveat, precisely: `FACTORS` IS the table `attributions()` walks, so that half cannot drift.
+/// `LIT_LABELS` is only a label lookup over whatever `literature_terms()` emits, so a key added here
+/// and never emitted there would still pass. That is inert today — the gate fires only on keys in
+/// `coefficients.total_effect`, and no literature lever is one — but it is not the same guarantee.
+pub fn surfaced_keys() -> impl Iterator<Item = &'static str> {
+    FACTORS.iter().chain(LIT_LABELS.iter()).map(|(k, _)| *k)
+}
+
 /// Main-effect design keys (age-interaction `*_x_young` terms excluded) with user-facing labels.
 /// `mobility` fires only when the caller supplies it; unanswered profiles score 0.
 const FACTORS: &[(&str, &str)] = &[
     ("smk_former", "Former smoking"),
     ("smk_current", "Current smoking"),
+    // Since the smoking contrast was corrected, smk_current no longer carries the dose — so leaving
+    // cigs_day out of here dropped over a year of harm from why[] and from the ranking, while
+    // What-If priced it. That produced a visible contradiction: "quit smoking" read +4.7 years in
+    // What-If and -3.0 in the breakdown for the same person.
+    //
+    // why[] and the recommendation now agree exactly (-3.0 + -1.2 = -4.2 = impact_years). What-If
+    // still reads +4.7 on that profile, and the ~0.5-year remainder is two effects, not a
+    // disagreement: about 0.13 of it is that removing both smoking terms JOINTLY through the
+    // RR -> years curve is not the sum of removing each marginally (the curve is exponential), and
+    // about 0.37 is a difference of REFERENCE LEVEL — What-If credits the user back to a real
+    // never-smoker's zero dose, whereas why[] credits every z-scored factor back to the cohort mean,
+    // which for a smoker is still ~2.6 cigarettes a day. Both are the right reference for their own
+    // question ("what would change if I quit" vs "how far from average is this"), so the remainder
+    // is expected and stable — but it is mostly the reference, not the exponential.
+    ("cigs_day", "Cigarettes per day"),
     ("activity", "Physical activity"),
     ("sleep_long", "Long sleep"),
     ("waist", "Waist circumference"),
@@ -326,6 +369,17 @@ const FACTORS: &[(&str, &str)] = &[
     ("cancer_hx", "Cancer history"),
     ("education", "Education"),
     ("income", "Income"),
+];
+
+/// The literature levers, which reach why[] through the same removal semantics but a different
+/// coefficient block. Part of the surfaced set — but only as a label lookup: what actually reaches
+/// why[] is whatever `literature_terms()` emits, and it hardcodes its own keys. See the caveat on
+/// `surfaced_keys()`.
+const LIT_LABELS: &[(&str, &str)] = &[
+    ("diet", "Diet quality"),
+    ("alcohol", "Alcohol"),
+    ("sedentary", "Sitting time"),
+    ("stress", "Perceived stress"),
 ];
 
 /// Per-factor "Why?" attribution: for each factor the user deviates from the reference on, the year
@@ -381,12 +435,6 @@ pub fn attributions(bundle: &Bundle, p: &Profile) -> Result<Vec<Attribution>, St
     }
     // Literature levers (LEV-03): same removal semantics — each answered, non-reference lever shows
     // the years its deviation is worth, at its real (often weaker) evidence grade.
-    const LIT_LABELS: &[(&str, &str)] = &[
-        ("diet", "Diet quality"),
-        ("alcohol", "Alcohol"),
-        ("sedentary", "Sitting time"),
-        ("stress", "Perceived stress"),
-    ];
     for (key, d_lp) in literature_terms(p, &bundle.coefficients) {
         if d_lp == 0.0 {
             continue; // answered exactly at the reference — nothing to explain
@@ -584,7 +632,7 @@ mod tests {
     use std::path::Path;
 
     fn bundle() -> Bundle {
-        Bundle::load(Path::new("bundle/model-v3.0.0")).expect("bundle loads")
+        Bundle::load(Path::new("bundle/model-v3.0.1")).expect("bundle loads")
     }
 
     #[test]

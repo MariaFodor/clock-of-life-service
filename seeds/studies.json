@@ -177,6 +177,10 @@
     {
       "feature_key": "env",
       "study_code": "environment-location-mapping"
+    },
+    {
+      "feature_key": "cigs_day",
+      "study_code": "evidence-grades-and-alcohol"
     }
   ],
   "rule_studies": [

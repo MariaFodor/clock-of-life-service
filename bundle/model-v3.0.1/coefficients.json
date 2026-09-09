@@ -20,38 +20,38 @@
     "waist_x_young": 0.08194260827932967
   },
   "total_effect": {
-    "smk_former": 0.12631969343787625,
-    "smk_current": 0.5436134710766533,
-    "cigs_day": 0.16966314613159889,
+    "smk_former": 0.2735407004352559,
+    "smk_current": 0.38258716353592664,
+    "cigs_day": 0.10908333790542375,
     "activity": -0.2751631255146609,
     "waist": 0.010848603808008596
   },
   "total_effect_sd": {
-    "smk_former": 0.042512032350678346,
-    "smk_current": 0.05187189172221865,
-    "cigs_day": 0.017689143078874404,
+    "smk_former": 0.045814071944324464,
+    "smk_current": 0.0859219165529002,
+    "cigs_day": 0.02745641069517421,
     "activity": 0.021883461111674492,
     "waist": 0.024541490194037046
   },
   "total_effect_source": {
     "smk_former": "prior_blended",
-    "smk_current": "prior_blended",
+    "smk_current": "data_only_units_mismatch",
     "cigs_day": "data_only_units_mismatch",
     "activity": "data_only_units_mismatch",
     "waist": "data_only_units_mismatch"
   },
   "total_effect_data_only": {
     "smk_former": {
-      "mean": 0.09683051462342802,
-      "se": 0.04696751935815869
+      "mean": 0.27713780417572736,
+      "se": 0.05154136504709908
     },
     "smk_current": {
-      "mean": 0.4829809014896452,
-      "se": 0.05528263129209898
+      "mean": 0.38258716353592664,
+      "se": 0.0859219165529002
     },
     "cigs_day": {
-      "mean": 0.16966314613159889,
-      "se": 0.017689143078874404
+      "mean": 0.10908333790542375,
+      "se": 0.02745641069517421
     },
     "activity": {
       "mean": -0.2751631255146609,
@@ -68,14 +68,20 @@
   ],
   "adjustment_sets": {
     "smk_former": [
+      "smk_current",
+      "cigs_day",
       "education",
       "income"
     ],
     "smk_current": [
+      "smk_former",
+      "cigs_day",
       "education",
       "income"
     ],
     "cigs_day": [
+      "smk_former",
+      "smk_current",
       "education",
       "income"
     ],
@@ -104,10 +110,13 @@
     "rationale": "4 age bands x sex. Chosen on measured deaths per stratum (min 66) and on the sign of the young-smoking term, which is negative unstratified and positive under every candidate split. The exact figures are asserted by tests/test_golden.py rather than restated here.",
     "measured": "2026-09-09"
   },
+  "conditional_defaults": {
+    "cigs_day_when_current_smoker": 12.180940083564199
+  },
   "attribution": {
-    "smk_former": 0.12631969343787625,
-    "smk_current": 0.5436134710766533,
-    "cigs_day": 0.16966314613159889,
+    "smk_former": 0.2735407004352559,
+    "smk_current": 0.38258716353592664,
+    "cigs_day": 0.10908333790542375,
     "activity": -0.2751631255146609,
     "waist": 0.010848603808008596
   },
