@@ -211,26 +211,31 @@ async fn seed_recommendation_rules(pool: &PgPool) -> Result<(), sqlx::Error> {
     // Ownership is a column, not a name prefix — the earlier `Rtest%` carve-out matched only what
     // the test suite happens to call its fixtures, so the suite could not have caught the bug.
     let keep: Vec<String> = rules.iter().map(|r| r.code.clone()).collect();
+    // The withdrawal and its audit row commit together: a crash between them would leave exactly
+    // the unaudited deactivation this change exists to prevent.
+    let mut tx = pool.begin().await?;
     let withdrawn: Vec<String> = sqlx::query_scalar(
         "UPDATE recommendation_rule SET active = false
          WHERE active AND managed AND code <> ALL($1)
          RETURNING code",
     )
     .bind(&keep)
-    .fetch_all(pool)
+    .fetch_all(&mut *tx)
     .await?;
     for code in &withdrawn {
-        // Every decision the system makes on its own leaves a trace naming what it did and why.
-        eprintln!("[reconcile] withdrew seed rule '{code}': no longer in the desired state");
         sqlx::query(
             "INSERT INTO audit_event (admin_id, entity, entity_id, action, citation)
              VALUES (NULL, 'recommendation_rule', $1, 'deactivate',
                      'startup reconciliation: rule removed from the seed')",
         )
         .bind(code)
-        .execute(pool)
-        .await
-        .ok();
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    for code in &withdrawn {
+        // Every decision the system makes on its own leaves a trace naming what it did and why.
+        eprintln!("[reconcile] withdrew seed rule '{code}': no longer in the desired state");
     }
     
     Ok(())

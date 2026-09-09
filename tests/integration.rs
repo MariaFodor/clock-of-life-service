@@ -1151,9 +1151,9 @@ fn admin_question_codes_are_safe() {
 }
 
 /// REVIEW-2026-09-09 S4 + PR#1 F2/F3/F4: any bundle the scorer can't fully use is refused at load
-/// (fail closed) instead of panicking inside the estimate handler. Every refusal arm is pinned:
-/// the two vendored older bundles are real fixtures; the categorical/unknown-kind arms use
-/// synthetic bundles written to a temp dir.
+/// (fail closed) instead of panicking inside the estimate handler. Every refusal arm is pinned by
+/// a synthetic bundle written to a temp dir — the vendored older bundles that used to serve as
+/// fixtures are gone, and a test should not depend on which artifacts happen to sit in the repo.
 #[test]
 fn incompatible_bundle_refused_at_load() {
     // Synthetic fixtures rather than vendored dead bundles: the historical v2.0.0/v2.1.0 copies
@@ -1191,10 +1191,16 @@ fn incompatible_bundle_refused_at_load() {
     // A continuous literature lever without its standardizer -> literature arm.
     let err = load_with(&|c| { c["standardizer"].as_object_mut().unwrap().remove("diet"); }, "no-diet-std");
     assert!(err.contains("literature lever"), "got: {err}");
+
+    // A prediction coefficient the design never emits would be silently scored as zero — this is
+    // the gate that made the old v2.2.0 bundle (bmi = -1.006 per SD) unloadable rather than quietly
+    // mis-scored, and deleting that bundle removed the only thing exercising it.
+    let err = load_with(&|c| { c["prediction"]["bmi"] = serde_json::json!(-1.006); }, "orphan-bmi");
+    assert!(err.contains("never emits"), "got: {err}");
 }
 
 /// PR#1 F4: the remaining literature-gate arms, on synthetic bundles. Each variant patches the good
-/// v2.2.0 coefficients and must be refused with a message naming the reason.
+/// v3.0.0 coefficients and must be refused with a message naming the reason.
 #[test]
 fn literature_gate_refuses_each_malformed_variant() {
     let good: serde_json::Value = serde_json::from_str(
@@ -1330,10 +1336,16 @@ fn reconciliation_spares_admin_authored_rules() {
     RT.block_on(async {
     let s = state().await;
     let code = format!("Radmin_{}", std::process::id());
+    // Defensive: a previous run that failed mid-test would otherwise leave this row behind.
+    sqlx::query("DELETE FROM recommendation_rule WHERE code LIKE 'Radmin_%' OR code LIKE 'Rtest_withdrawn_%'")
+        .execute(&s.pool).await.ok();
+    // The condition must NEVER match a real profile: cleanup runs only on the happy path, so a
+    // matching rule surviving a failed assert would break every count and study-coverage test in
+    // the suite, permanently, on the shared database.
     sqlx::query(
         "INSERT INTO recommendation_rule
              (code, feature_key, condition, message, priority, evidence_citation, active, managed)
-         VALUES ($1, 'waist', '{\"field\":\"waist\",\"op\":\"gt\",\"value\":100}',
+         VALUES ($1, 'waist', '{\"field\":\"smoke\",\"op\":\"eq\",\"value\":99}',
                  'admin-authored advice', 40, 'ops: manual', true, false)
          ON CONFLICT (code) DO UPDATE SET active = true, managed = false",
     )
@@ -1357,7 +1369,7 @@ fn reconciliation_spares_admin_authored_rules() {
     sqlx::query(
         "INSERT INTO recommendation_rule
              (code, feature_key, condition, message, priority, evidence_citation, active, managed)
-         VALUES ($1, 'waist', '{\"field\":\"waist\",\"op\":\"gt\",\"value\":100}',
+         VALUES ($1, 'waist', '{\"field\":\"smoke\",\"op\":\"eq\",\"value\":99}',
                  'was seeded once', 40, 'seed', true, true)
          ON CONFLICT (code) DO UPDATE SET active = true, managed = true",
     )
@@ -1394,5 +1406,11 @@ fn whatif_refuses_sleep_with_a_reason() {
     let body = body_json(resp).await;
     let msg = body["error"].as_str().unwrap();
     assert!(msg.contains("marker"), "the refusal must say why, got: {msg}");
+
+    // But a client that submits its whole slider set with sleep UNCHANGED is asking a valid
+    // question about the other levers, and must get an answer rather than a refusal.
+    let resp = call(&s, post("/api/whatif",
+        json!({"base": base, "changes": {"smoke": 0, "sleep": 9.5}}))).await;
+    assert_eq!(resp.status(), StatusCode::OK, "unchanged sleep must not refuse the scenario");
     });
 }

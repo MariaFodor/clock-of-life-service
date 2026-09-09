@@ -476,7 +476,9 @@ pub fn whatif(bundle: &Bundle, base: &Profile, changes: &WhatIfChanges) -> Resul
         }
     }
     if let Some(v) = changes.pa_min { modified.pa_min = v; }
-    if changes.sleep.is_some() {
+    // Refused only when it would actually CHANGE sleep: a client that submits its full slider set
+    // unchanged is asking a valid question about the other levers, and should get an answer.
+    if changes.sleep.is_some_and(|v| (v - base.sleep).abs() > f64::EPSILON) {
         // Refuse, rather than apply it and return a confident 0.0: the model has no lever
         // coefficient for sleep since ONT-01, so any delta would be an artefact of that absence.
         return Err("sleep is no longer a What-If lever: long sleep is a marker of illness rather \
