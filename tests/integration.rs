@@ -434,6 +434,49 @@ fn recommendation_prices_the_signed_exposure_not_a_pile_of_magnitudes() {
     });
 }
 
+/// Cutting down is a What-If lever, and it is priced honestly. why[] charges a smoker for the dose
+/// since the smoking contrast was corrected, so What-If has to let them ask about it — offering a
+/// different set of things than the breakdown charges for is what produced the +4.7-vs--3.0 split
+/// this bundle was released to fix.
+#[test]
+fn whatif_prices_cutting_down_and_says_it_is_not_quitting() {
+    RT.block_on(async {
+    let s = state().await;
+    let smoker = json!({"country": "RO", "age": 55, "sex": "M", "smoke": 2, "cigs_day": 20.0,
+                        "pa_min": 300, "sleep": 7, "waist": 100});
+
+    // Halving the dose helps, and less than quitting outright does.
+    let cut = body_json(call(&s, post("/api/whatif",
+        json!({"base": smoker, "changes": {"cigs_day": 10.0}}))).await).await;
+    let cut_delta = cut["delta_years"].as_f64().unwrap();
+    assert!(cut_delta > 0.0, "cutting down must help: {cut_delta}");
+    assert!(cut["note"].as_str().unwrap_or("").contains("Quitting is worth more"),
+            "reduction must not read as equivalent to stopping: {:?}", cut["note"]);
+
+    let quit = body_json(call(&s, post("/api/whatif",
+        json!({"base": smoker, "changes": {"smoke": 0}}))).await).await;
+    let quit_delta = quit["delta_years"].as_f64().unwrap();
+    assert!(quit_delta > cut_delta,
+            "quitting ({quit_delta}) must beat halving ({cut_delta})");
+
+    // Quitting zeroes the dose even when the client leaves its cigarettes slider where it was, so
+    // nobody is scored as having both stopped and still smoking twenty a day.
+    let both = body_json(call(&s, post("/api/whatif",
+        json!({"base": smoker, "changes": {"smoke": 0, "cigs_day": 20.0}}))).await).await;
+    assert!((both["delta_years"].as_f64().unwrap() - quit_delta).abs() < 1e-9,
+            "quitting must ignore a stale dose: {} vs {quit_delta}", both["delta_years"]);
+    assert!(both["note"].as_str().unwrap_or("").contains("cessation"),
+            "quitting keeps the cessation note, not the cutting-down one: {:?}", both["note"]);
+
+    // The dose is bounded like every other lever, and an implausible one is refused with a reason.
+    let resp = call(&s, post("/api/whatif",
+        json!({"base": smoker, "changes": {"cigs_day": 300.0}}))).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let err = body_json(resp).await;
+    assert!(err["error"].as_str().unwrap().contains("between 0 and 60"), "got {err}");
+    });
+}
+
 /// DB3: What-If without a base is a pure overlay — nothing persisted, no auth required.
 #[test]
 fn whatif_overlay_only_when_no_base() {

@@ -479,6 +479,13 @@ pub struct WhatIfChanges {
     pub pa_min: Option<f64>,
     pub sleep: Option<f64>,
     pub waist: Option<f64>,
+    /// Cigarettes per day. A lever in its own right since v3.0.1: the corrected smoking contrast
+    /// moved the dose out of `smk_current` and into its own coefficient, so the breakdown charges
+    /// years for it. Charging for something a person cannot then ask about is the inconsistency
+    /// that produced the +4.7-vs--3.0 split between What-If and Why? — the surfaces have to offer
+    /// the same set of things.
+    #[serde(default)]
+    pub cigs_day: Option<f64>,
     // Literature levers (LEV-03): their coefficients ARE total effects (standalone additive terms),
     // so the overlay prices them with the same numbers the estimate uses.
     #[serde(default)]
@@ -524,6 +531,27 @@ pub fn whatif(bundle: &Bundle, base: &Profile, changes: &WhatIfChanges) -> Resul
         }
     }
     if let Some(v) = changes.pa_min { modified.pa_min = v; }
+    if let Some(v) = changes.cigs_day {
+        if !(0.0..=60.0).contains(&v) {
+            return Err("cigarettes per day must be between 0 and 60".into());
+        }
+        modified.cigs_day = v;
+        // Cutting down is not quitting, and saying so is not a detail. The dose coefficient is a
+        // per-cigarette gradient estimated across smokers; applied to a reduction it assumes the
+        // reduced smoker ends up like someone who always smoked that little, which trials of
+        // reduction-without-cessation do not support — compensatory deeper inhalation is the usual
+        // explanation. We price the change the model's own way and say plainly that it is the
+        // optimistic reading, so nobody reads "cut down to 10" as equivalent to stopping.
+        if modified.smoke == 2 && v < base.cigs_day && changes.smoke.is_none_or(|s| s == 2) {
+            note = Some("cutting down is priced at the model's per-cigarette gradient, which is                          the optimistic reading — trials of reduction without quitting show less                          benefit than the gradient implies. Quitting is worth more.".into());
+        }
+    }
+    // Quitting zeroes the dose: design() already scores a non-smoker's cigs_day as 0, but the
+    // profile must agree with it or the note above and the validation below read from a person who
+    // both quit and still smokes 20 a day.
+    if modified.smoke != 2 {
+        modified.cigs_day = 0.0;
+    }
     // Refused only when it would actually CHANGE sleep: a client that submits its full slider set
     // unchanged is asking a valid question about the other levers, and should get an answer.
     if changes.sleep.is_some_and(|v| (v - base.sleep).abs() > f64::EPSILON) {
@@ -718,7 +746,7 @@ mod tests {
         base.alcohol = Some("heavy".into());
         base.diet_score = Some(0.0);
         let changes = WhatIfChanges {
-            smoke: None, pa_min: None, sleep: None, waist: None,
+            smoke: None, pa_min: None, sleep: None, waist: None, cigs_day: None,
             diet_score: Some(5.0), alcohol: Some("none".into()),
             sitting_hours: None, stress_score: None,
         };
