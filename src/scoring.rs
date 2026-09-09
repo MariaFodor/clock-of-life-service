@@ -140,6 +140,24 @@ fn z(raw: f64, coefs: &Coefficients, key: &str) -> f64 {
 }
 
 /// The design vector, keyed by coefficient name (matches the bundle's coefficient keys).
+/// The dose the model actually scores for this person, imputation included. Anything reasoning about
+/// a dose CHANGE has to compare like with like: an undeclared smoker's raw `cigs_day` is 0 but the
+/// number that reaches the linear predictor is the cohort's smoker mean, so comparing raw fields
+/// makes a real reduction look like an increase and vice versa.
+pub fn effective_cigs_day(p: &Profile, coefs: &Coefficients) -> f64 {
+    if p.smoke != 2 {
+        return 0.0;
+    }
+    if p.cigs_day > 0.0 {
+        p.cigs_day
+    } else {
+        coefs.conditional_defaults
+            .get("cigs_day_when_current_smoker")
+            .copied()
+            .unwrap_or(0.0)
+    }
+}
+
 pub fn design(p: &Profile, coefs: &Coefficients) -> HashMap<String, f64> {
     let young = if p.age < coefs.young_cutoff { 1.0 } else { 0.0 };
     let smk_current = if p.smoke == 2 { 1.0 } else { 0.0 };
@@ -152,19 +170,7 @@ pub fn design(p: &Profile, coefs: &Coefficients) -> HashMap<String, f64> {
     // did not answer the dose question is scored at the cohort's smoker mean from the bundle, not at
     // zero — since the contrast fix, `smk_current` no longer carries dose, so zero would describe a
     // smoker who smokes nothing (REVIEW S9).
-    let cigs = if p.smoke == 2 {
-        if p.cigs_day > 0.0 {
-            p.cigs_day
-        } else {
-            coefs.conditional_defaults
-                .get("cigs_day_when_current_smoker")
-                .copied()
-                .unwrap_or(0.0)
-        }
-    } else {
-        0.0
-    };
-    d.insert("cigs_day".into(), z(cigs, coefs, "cigs_day"));
+    d.insert("cigs_day".into(), z(effective_cigs_day(p, coefs), coefs, "cigs_day"));
     // BMI is deliberately NOT scored (REFIT-01). It is ~0.9 correlated with waist, and fitting both
     // let BMI take a large negative coefficient — the shipped model rewarded being heavier. Waist is
     // the adiposity measure. The field is still accepted and validated so older clients do not break;
@@ -498,6 +504,26 @@ pub struct WhatIfChanges {
     pub stress_score: Option<f64>,
 }
 
+/// Why cutting down is not priced like quitting.
+///
+/// Two reasons the model's own arithmetic is optimistic here, and the second is the bigger one.
+/// (1) Compensation: people who cut down inhale more deeply per cigarette. (2) Concavity: the
+/// smoking dose-response is strongly concave — the first few cigarettes a day carry a
+/// disproportionate share of the excess risk (Bjartveit & Tverdal 2005,
+/// https://doi.org/10.1136/tc.2005.011932) — so a LINEAR per-cigarette term of the kind this model
+/// fits systematically overstates what halving buys.
+///
+/// The headline claim is COHORT evidence, not trial evidence: reduction trials are powered for
+/// cessation, not mortality. Godtfredsen 2002 followed 19,732 people for 16 years and is the exact
+/// reduction-vs-cessation-vs-continuing all-cause-mortality contrast asserted here. Both DOIs
+/// verified against api.crossref.org (title, first author and journal checked, not assumed).
+const REDUCTION_NOTE: &str =
+    "cutting down is priced at the model's per-cigarette gradient, which is the optimistic \
+     reading. Smoking risk is concave — the first few cigarettes a day carry far more than their \
+     share — and cohort studies of smokers who cut down have found little to no reduction in \
+     all-cause mortality. Quitting is worth much more. \
+     (Godtfredsen 2002, https://doi.org/10.1093/aje/kwf150)";
+
 #[derive(Serialize)]
 pub struct WhatIf {
     pub current_years: f64,
@@ -535,20 +561,35 @@ pub fn whatif(bundle: &Bundle, base: &Profile, changes: &WhatIfChanges) -> Resul
         if !(0.0..=60.0).contains(&v) {
             return Err("cigarettes per day must be between 0 and 60".into());
         }
+        // Zero is not a dose, it is quitting — and routing it through this lever gets it WRONG.
+        // design() reads a current smoker's zero as "did not answer" and imputes the cohort's
+        // smoker mean, which is the right default for an interview and the wrong one here: it made
+        // cutting to zero score better than continuing but WORSE than cutting to one, so the left
+        // end of a dose slider was the least accurate point on it. Refuse and name the lever that
+        // does model this, rather than silently reinterpreting what the person asked for.
+        if v == 0.0 && modified.smoke == 2 {
+            return Err("smoking zero cigarettes a day is quitting, and quitting is modelled by \
+                        the smoking lever rather than the dose one: set smoking to never instead. \
+                        A zero dose on a current smoker means \"not answered\" everywhere else in \
+                        the model, and would be scored at the average smoker's consumption."
+                .into());
+        }
         modified.cigs_day = v;
-        // Cutting down is not quitting, and saying so is not a detail. The dose coefficient is a
-        // per-cigarette gradient estimated across smokers; applied to a reduction it assumes the
-        // reduced smoker ends up like someone who always smoked that little, which trials of
-        // reduction-without-cessation do not support — compensatory deeper inhalation is the usual
-        // explanation. We price the change the model's own way and say plainly that it is the
-        // optimistic reading, so nobody reads "cut down to 10" as equivalent to stopping.
-        if modified.smoke == 2 && v < base.cigs_day && changes.smoke.is_none_or(|s| s == 2) {
-            note = Some("cutting down is priced at the model's per-cigarette gradient, which is                          the optimistic reading — trials of reduction without quitting show less                          benefit than the gradient implies. Quitting is worth more.".into());
+        // Cutting down is not quitting, and saying so is not a detail. Compared against the
+        // EFFECTIVE dose, not the raw field: an undeclared smoker is scored at the cohort mean, so
+        // comparing raw fields stayed silent on exactly the reductions the model imputes. Gated on
+        // the BASE being a current smoker too — `base.cigs_day` is never scored for a former
+        // smoker, so a former smoker resuming at a lower number than some stale field was being
+        // congratulated for cutting down.
+        let base_dose = effective_cigs_day(base, &bundle.coefficients);
+        if modified.smoke == 2 && base.smoke == 2 && v < base_dose {
+            note = Some(REDUCTION_NOTE.into());
         }
     }
-    // Quitting zeroes the dose: design() already scores a non-smoker's cigs_day as 0, but the
-    // profile must agree with it or the note above and the validation below read from a person who
-    // both quit and still smokes 20 a day.
+    // Defensive only, and deliberately kept: design() is what actually zeroes a non-smoker's dose,
+    // so nothing today depends on this line — deleting it leaves every test green. It exists so
+    // `modified` is never internally inconsistent (a person who both quit and smokes twenty a day)
+    // for whoever adds the next consumer of this profile.
     if modified.smoke != 2 {
         modified.cigs_day = 0.0;
     }
