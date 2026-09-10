@@ -44,17 +44,57 @@ pub struct Profile {
 pub const ALCOHOL_LEVELS: &[&str] = &["none", "light", "moderate", "heavy"];
 fn default_income() -> f64 { 2.5 }
 
-// ENV term (RES-04): a location's log-hazard contribution vs the national-average reference. Illustrative
-// RO reference — must be re-sourced with real RO PM2.5/NDVI layers before the relocation surface ships.
-pub const RO_PM25_REF: f64 = 14.0;
-pub const RO_NDVI_REF: f64 = 0.5;
+/// What the ENV term could not be priced against, and why — so a caller can say so instead of showing 0.
+///
+/// `0.0` and "no layer" are different facts that used to produce the same number. A reader seeing
+/// `greenspace: +0.0 years` reads "greenspace makes no difference where I live"; the truth was "nobody
+/// has measured greenness in your country".
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub enum EnvRefused {
+    /// The profile carries no exposure at all — no home location picked. Not a gap in the data.
+    NoLocation,
+    /// The country has no measured reference for this exposure, so a deviation from it is undefined.
+    NoReference,
+}
 
-/// The environment log-HR addend for a location: `ln(1.095)·(PM25−ref)/10 + ln(0.965)·(NDVI−ref)/0.1`.
-/// Absent inputs contribute 0 (i.e. treated as the reference), so a location-less profile is unaffected.
-pub fn env_term(pm25: Option<f64>, ndvi: Option<f64>) -> f64 {
-    let air = pm25.map_or(0.0, |p| (1.095_f64).ln() * (p - RO_PM25_REF) / 10.0);
-    let green = ndvi.map_or(0.0, |n| (0.965_f64).ln() * (n - RO_NDVI_REF) / 0.1);
-    air + green
+/// The environment log-HR addend for a location: `ln(1.095)·(PM25−ref)/10 + ln(0.965)·(NDVI−ref)/0.1`,
+/// where `ref` is THIS COUNTRY'S measured average rather than a constant.
+///
+/// It was a constant until v4.1.0: `RO_PM25_REF = 14.0` and `RO_NDVI_REF = 0.5`, applied to every
+/// country, with a comment saying they had to be re-sourced before the relocation surface shipped. They
+/// were wrong for Romania too — WHO measures 10.412 and Bucharest's NDVI is 0.2539 — and the seeded
+/// locations were built to match them, so "Romania (national average), pm25 = 14.0" correctly scored
+/// zero against a fiction. Both halves move together here; fixing either alone gives a reader living at
+/// their own country's average a penalty for it.
+///
+/// Returns the addend AND what it refused to price, because the caller has to be able to report the
+/// difference between "this makes no difference" and "we have no layer here".
+pub fn env_term_with_reason(
+    pm25: Option<f64>,
+    ndvi: Option<f64>,
+    reference: Option<&crate::bundle::EnvReference>,
+) -> (f64, Vec<(&'static str, EnvRefused)>) {
+    let mut refused = Vec::new();
+    let air = match (pm25, reference) {
+        (None, _) => { refused.push(("pm25", EnvRefused::NoLocation)); 0.0 }
+        (Some(p), Some(r)) => (1.095_f64).ln() * (p - r.pm25) / 10.0,
+        (Some(_), None) => { refused.push(("pm25", EnvRefused::NoReference)); 0.0 }
+    };
+    let green = match (ndvi, reference.and_then(|r| r.ndvi)) {
+        (None, _) => { refused.push(("ndvi", EnvRefused::NoLocation)); 0.0 }
+        (Some(n), Some(r)) => (0.965_f64).ln() * (n - r) / 0.1,
+        (Some(_), None) => { refused.push(("ndvi", EnvRefused::NoReference)); 0.0 }
+    };
+    (air + green, refused)
+}
+
+/// The addend alone, for the scoring path, which has nowhere to put a reason.
+pub fn env_term(
+    pm25: Option<f64>,
+    ndvi: Option<f64>,
+    reference: Option<&crate::bundle::EnvReference>,
+) -> f64 {
+    env_term_with_reason(pm25, ndvi, reference).0
 }
 
 impl Profile {
@@ -302,7 +342,7 @@ fn risk<'a>(bundle: &'a Bundle, p: &Profile) -> Result<(f64, &'a Baseline), Stri
     // Cohort-fitted linear predictor + the location ENV term (context; 0 for a location-less profile,
     // and 0 for an average-location user, so the national-average reference is unaffected).
     let lp = linear_predictor(&design(p, &bundle.coefficients), &bundle.coefficients.prediction)
-        + env_term(p.pm25, p.ndvi)
+        + env_term(p.pm25, p.ndvi, base.env_reference.as_ref())
         + literature_lp(p, &bundle.coefficients);
     let reference = if p.age < bundle.coefficients.young_cutoff { base.reference_lp.young } else { base.reference_lp.old };
     Ok(((lp - reference).exp(), base))
@@ -729,7 +769,7 @@ mod tests {
     use std::path::Path;
 
     fn bundle() -> Bundle {
-        Bundle::load(Path::new("bundle/model-v4.0.0")).expect("bundle loads")
+        Bundle::load(Path::new("bundle/model-v4.1.1")).expect("bundle loads")
     }
 
     #[test]
@@ -882,10 +922,34 @@ mod tests {
 
     #[test]
     fn env_term_signs_and_neutrality() {
-        assert_eq!(env_term(None, None), 0.0, "no location → no ENV effect");
-        assert!(env_term(Some(RO_PM25_REF), Some(RO_NDVI_REF)).abs() < 1e-12, "reference → ENV 0");
-        assert!(env_term(Some(24.0), Some(RO_NDVI_REF)) > 0.0, "dirtier air → positive log-HR (worse)");
-        assert!(env_term(Some(RO_PM25_REF), Some(0.7)) < 0.0, "greener → negative log-HR (better)");
+        let b = bundle();
+        let ro = b.baselines.get("RO").and_then(|x| x.env_reference.as_ref())
+            .expect("RO carries a measured exposure reference");
+        assert_eq!(env_term(None, None, Some(ro)), 0.0, "no location → no ENV effect");
+        // Neutral at THIS country's own reference, which is the property that used to hold only for a
+        // reader living at a made-up 14.0 µg/m³.
+        assert!(env_term(Some(ro.pm25), ro.ndvi, Some(ro)).abs() < 1e-12,
+                "a reader at their own country's average → ENV 0");
+        assert!(env_term(Some(ro.pm25 + 10.0), ro.ndvi, Some(ro)) > 0.0,
+                "dirtier air → positive log-HR (worse)");
+        assert!(env_term(Some(ro.pm25), Some(ro.ndvi.unwrap() + 0.2), Some(ro)) < 0.0,
+                "greener → negative log-HR (better)");
+        // The reference is no longer one number for the world. Two countries must price the same
+        // exposure differently, or the whole change is cosmetic.
+        let other = b.baselines.values()
+            .find(|x| x.env_reference.as_ref().is_some_and(|e| (e.pm25 - ro.pm25).abs() > 1.0))
+            .and_then(|x| x.env_reference.as_ref())
+            .expect("some other country has a different measured reference");
+        assert_ne!(env_term(Some(12.0), None, Some(ro)), env_term(Some(12.0), None, Some(other)),
+                   "the same air must price differently in two countries with different averages");
+        // And the difference between "no effect" and "no layer" must be reportable, not silently 0.
+        let (value, refused) = env_term_with_reason(Some(12.0), Some(0.3), None);
+        assert_eq!(value, 0.0, "nothing is priced without a reference");
+        assert!(refused.iter().any(|(k, r)| *k == "pm25" && *r == EnvRefused::NoReference),
+                "a missing reference is reported as NoReference, not as a zero effect");
+        let (_, none_picked) = env_term_with_reason(None, None, Some(ro));
+        assert!(none_picked.iter().all(|(_, r)| *r == EnvRefused::NoLocation),
+                "a reader who picked no location has no gap in the data");
     }
 
     #[test]

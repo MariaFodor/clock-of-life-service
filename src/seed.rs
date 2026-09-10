@@ -20,7 +20,6 @@ const FEATURES_JSON: &str = include_str!("../seeds/features.json");
 const QUESTIONS_JSON: &str = include_str!("../seeds/questions.json");
 const RULES_JSON: &str = include_str!("../seeds/recommendation_rules.json");
 const STUDIES_JSON: &str = include_str!("../seeds/studies.json");
-const LOCATIONS_JSON: &str = include_str!("../seeds/locations.json");
 
 #[derive(Deserialize)]
 struct FeatureSeed {
@@ -65,21 +64,6 @@ struct StudySeedFile {
 }
 
 #[derive(Deserialize)]
-struct LocationSeed {
-    name: String,
-    country: String,
-    pm25: Option<f64>,
-    ndvi: Option<f64>,
-    area_type: Option<String>,
-    as_of: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct LocationSeedFile {
-    locations: Vec<LocationSeed>,
-}
-
-#[derive(Deserialize)]
 struct RuleSeed {
     code: String,
     feature_key: String,
@@ -113,12 +97,13 @@ pub async fn reconcile(
     pool: &PgPool,
     manifest: &Manifest,
     artifact_uri: &str,
+    bundle: &crate::bundle::Bundle,
 ) -> Result<SeedResult, sqlx::Error> {
     seed_features(pool).await?;
     seed_questions(pool).await?;
     seed_recommendation_rules(pool).await?;
     seed_studies(pool).await?;
-    seed_locations(pool).await?;
+    seed_locations(pool, bundle).await?;
     let active_model_id = pin_model_version(pool, manifest, artifact_uri).await?;
     ensure_anonymous(pool).await?;
     Ok(SeedResult {
@@ -284,30 +269,121 @@ async fn seed_studies(pool: &PgPool) -> Result<(), sqlx::Error> {
 
 /// Seed the location table (PM2.5 / greenspace per place) for the ENV feature + relocation compare.
 /// Values are illustrative placeholders (RES-04): real RO layers must replace them before launch.
-async fn seed_locations(pool: &PgPool) -> Result<(), sqlx::Error> {
-    let data: LocationSeedFile =
-        serde_json::from_str(LOCATIONS_JSON).expect("locations.json seed is valid");
-    for l in &data.locations {
-        let as_of = l
-            .as_of
-            .as_deref()
-            .and_then(|s| chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").ok());
-        sqlx::query(
-            "INSERT INTO location (name, country, pm25, ndvi, area_type, as_of)
-             VALUES ($1, $2, $3, $4, $5, $6)
-             ON CONFLICT (name, country) DO UPDATE SET
-                 pm25 = EXCLUDED.pm25, ndvi = EXCLUDED.ndvi,
-                 area_type = EXCLUDED.area_type, as_of = EXCLUDED.as_of",
-        )
-        .bind(&l.name)
-        .bind(&l.country)
-        .bind(l.pm25)
-        .bind(l.ndvi)
-        .bind(&l.area_type)
-        .bind(as_of)
-        .execute(pool)
-        .await?;
+/// The measured settlements from the bundle, replacing the seven invented Romanian rows.
+///
+/// Batched with UNNEST rather than looped: 3,522 rows at one round-trip each was the shape that made
+/// the old seven-row seed look cheap, and a cold boot would spend minutes in the driver.
+///
+/// Refuses an empty `places` list rather than succeeding. A pre-v4.1.0 bundle has no settlements, and
+/// "seeded nothing" would leave whatever the database already held — which, in any database that has
+/// ever booted, is the invented rows this exists to delete.
+async fn seed_locations(pool: &PgPool, bundle: &crate::bundle::Bundle) -> Result<(), sqlx::Error> {
+    if bundle.places.is_empty() {
+        // Not a silent skip: the seeder's whole job here is to make the fakes unreachable.
+        return Err(sqlx::Error::Protocol(
+            "bundle carries no places.json — refusing to seed locations, because leaving the \
+             previous (illustrative) rows in place is worse than failing to boot".into(),
+        ));
     }
+
+    // places.json keys countries by ISO3; `location.country` has always held ISO2, and stored profiles
+    // and deployed clients use it. The map comes from the bundle's own baselines rather than a table
+    // here, so there is one source for the pairing.
+    let iso3_to_iso2: std::collections::HashMap<&str, &str> = bundle
+        .reference
+        .iter()
+        .filter_map(|(iso2, b)| b.iso3.as_deref().map(|iso3| (iso3, iso2.as_str())))
+        .collect();
+
+    let src = "WHO Ambient Air Quality Database v8.0; greenness: Stowell et al. 2023 (CC0)";
+    let mut names: Vec<String> = Vec::new();
+    let mut countries: Vec<String> = Vec::new();
+    let mut iso3s: Vec<String> = Vec::new();
+    let mut pm25: Vec<f64> = Vec::new();
+    let mut ndvi: Vec<Option<f64>> = Vec::new();
+    let mut areas: Vec<String> = Vec::new();
+    let mut as_ofs: Vec<chrono::NaiveDate> = Vec::new();
+    let mut lats: Vec<f64> = Vec::new();
+    let mut lons: Vec<f64> = Vec::new();
+    let mut pops: Vec<Option<i64>> = Vec::new();
+    let mut pm_years: Vec<i32> = Vec::new();
+    let mut stations: Vec<Option<i32>> = Vec::new();
+    let mut nd_years: Vec<Option<i32>> = Vec::new();
+    let mut bases: Vec<Option<String>> = Vec::new();
+    let mut skipped = 0usize;
+
+    for p in &bundle.places {
+        let Some(iso2) = iso3_to_iso2.get(p.iso3.as_str()) else {
+            // A settlement in a country this bundle has no life table for. The model gate refuses to
+            // emit one, so this should be unreachable; counted rather than ignored so a future
+            // mismatch is visible in the log instead of being a quietly shorter list.
+            skipped += 1;
+            continue;
+        };
+        // `as_of` is the year the reading was taken, not the day it was loaded. The column is a DATE,
+        // so it becomes 1 January of the measurement year — a date that is honest about its precision
+        // in the only way the column allows.
+        let Some(as_of) = chrono::NaiveDate::from_ymd_opt(p.pm25_year, 1, 1) else {
+            skipped += 1;
+            continue;
+        };
+        names.push(p.city.clone());
+        countries.push((*iso2).to_string());
+        iso3s.push(p.iso3.clone());
+        pm25.push(p.pm25);
+        ndvi.push(p.ndvi);
+        // WHO measures settlements, not administrative areas, and does not classify them. 'city' here
+        // is the shape of the measurement, not a claim about population size — the country-level
+        // urban/rural/city/town splits live in the baseline's env_reference, where WHO does classify.
+        areas.push("city".to_string());
+        as_ofs.push(as_of);
+        lats.push(p.lat);
+        lons.push(p.lon);
+        pops.push(p.population);
+        pm_years.push(p.pm25_year);
+        stations.push(p.pm25_stations);
+        nd_years.push(p.ndvi_year);
+        bases.push(p.ndvi_basis.clone());
+    }
+    if skipped > 0 {
+        eprintln!("[seed] {skipped} settlement(s) skipped: no ISO2 for their country in this bundle");
+    }
+
+    sqlx::query(
+        "INSERT INTO location
+             (name, country, iso3, pm25, ndvi, area_type, as_of, lat, lon, population,
+              pm25_year, pm25_stations, ndvi_year, ndvi_basis, source)
+         SELECT * FROM UNNEST(
+             $1::text[], $2::text[], $3::text[], $4::numeric[], $5::numeric[], $6::text[],
+             $7::date[], $8::float8[], $9::float8[], $10::bigint[], $11::int[], $12::int[],
+             $13::int[], $14::text[]
+         ) AS t(name, country, iso3, pm25, ndvi, area_type, as_of, lat, lon, population,
+                pm25_year, pm25_stations, ndvi_year, ndvi_basis), (SELECT $15::text) AS s(source)
+         ON CONFLICT (name, country) DO UPDATE SET
+             iso3 = EXCLUDED.iso3, pm25 = EXCLUDED.pm25, ndvi = EXCLUDED.ndvi,
+             area_type = EXCLUDED.area_type, as_of = EXCLUDED.as_of,
+             lat = EXCLUDED.lat, lon = EXCLUDED.lon, population = EXCLUDED.population,
+             pm25_year = EXCLUDED.pm25_year, pm25_stations = EXCLUDED.pm25_stations,
+             ndvi_year = EXCLUDED.ndvi_year, ndvi_basis = EXCLUDED.ndvi_basis,
+             source = EXCLUDED.source",
+    )
+    .bind(&names)
+    .bind(&countries)
+    .bind(&iso3s)
+    .bind(&pm25)
+    .bind(&ndvi)
+    .bind(&areas)
+    .bind(&as_ofs)
+    .bind(&lats)
+    .bind(&lons)
+    .bind(&pops)
+    .bind(&pm_years)
+    .bind(&stations)
+    .bind(&nd_years)
+    .bind(&bases)
+    .bind(src)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 

@@ -593,12 +593,20 @@ pub struct LocationRow {
     pub pm25: Option<f64>,
     pub ndvi: Option<f64>,
     pub area_type: Option<String>,
+    /// The measurement years and the greenness provenance, carried so a caller can SAY them. A value
+    /// rendered without its year and its basis is indistinguishable from the invented ones this
+    /// replaced — which is how seven made-up Romanian rows shipped and stayed for months.
+    pub pm25_year: Option<i32>,
+    pub ndvi_year: Option<i32>,
+    /// "city" = measured here. "country" = this country's figure, shown for want of a local one.
+    pub ndvi_basis: Option<String>,
 }
 
 /// All locations, ordered by name.
 pub async fn list_locations(pool: &PgPool) -> Result<Vec<LocationRow>, sqlx::Error> {
     sqlx::query_as::<_, LocationRow>(
-        "SELECT name, country, pm25::float8 AS pm25, ndvi::float8 AS ndvi, area_type
+        "SELECT name, country, pm25::float8 AS pm25, ndvi::float8 AS ndvi, area_type,
+                pm25_year, ndvi_year, ndvi_basis
          FROM location ORDER BY name",
     )
     .fetch_all(pool)
@@ -672,7 +680,8 @@ pub async fn location_by_name(
     country: &str,
 ) -> Result<Option<LocationRow>, sqlx::Error> {
     sqlx::query_as::<_, LocationRow>(
-        "SELECT name, country, pm25::float8 AS pm25, ndvi::float8 AS ndvi, area_type
+        "SELECT name, country, pm25::float8 AS pm25, ndvi::float8 AS ndvi, area_type,
+                pm25_year, ndvi_year, ndvi_basis
          FROM location WHERE name = $1 AND country = $2",
     )
     .bind(name)
