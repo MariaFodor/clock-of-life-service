@@ -349,6 +349,20 @@ impl Bundle {
                         "baselines/{iso}.json: qx for sex '{sex}' is empty — refusing this bundle"
                     ));
                 }
+                // Contiguous, because the two consumers disagree about a hole: `remaining_le`
+                // interpolates across one, while `adult_mortality_15_60` reads a missing age as zero
+                // mortality that year. An abridged five-year table would make Romania's 45q15 read
+                // 31.8 instead of 179.6 — plausible, and wrong.
+                let mut ages: Vec<i64> = table.keys().filter_map(|a| a.parse().ok()).collect();
+                if ages.len() != table.len() {
+                    return Err(format!("baselines/{iso}.json: qx for '{sex}' has a non-numeric age"));
+                }
+                ages.sort_unstable();
+                if ages.windows(2).any(|w| w[1] != w[0] + 1) {
+                    return Err(format!(
+                        "baselines/{iso}.json: qx for '{sex}' skips an age — refusing this bundle"
+                    ));
+                }
             }
             Ok(())
         }

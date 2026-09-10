@@ -72,10 +72,13 @@ pub struct AppState {
     pub token_ttl_secs: i64,
     /// Directory of the built SPA to serve (client-side routing falls back to its index.html).
     pub web_dist: String,
-    /// The atlas, computed once at startup from the bundle's own life tables. A pure function of the
-    /// artifact: no database, no per-caller variation, so it is built here rather than per request.
-    pub atlas: Arc<serde_json::Value>,
-    /// Strong validator for the atlas body, so a repeat visit costs a 304 instead of 55 KB.
+    /// The atlas, serialized once at startup from the bundle's own life tables. A pure function of
+    /// the artifact: no database, no per-caller variation, so it is built here rather than per
+    /// request. Held as the finished BYTES, not a Value — the validator below is a digest of exactly
+    /// this string, so serving it verbatim makes "the ETag matches the body" true by construction
+    /// rather than true by inspection, and drops a deep clone plus a re-serialization per request.
+    pub atlas: Arc<String>,
+    /// Validator for the atlas body. Strong, because it is a digest of the exact bytes served.
     pub atlas_etag: String,
 }
 
@@ -120,10 +123,10 @@ pub async fn init_state(bundle_dir: &str, database_url: &str) -> Result<Arc<AppS
     let seeded = seed::reconcile(&pool, &b.manifest, bundle_dir)
         .await
         .map_err(|e| format!("db reconcile: {e}"))?;
-    let atlas = Arc::new(build_atlas(&b));
+    let atlas = Arc::new(build_atlas(&b).to_string());
     // A 16-hex digest of the body itself, not of the version: a bundle rebuilt at the same version
     // would otherwise serve a stale cached map.
-    let atlas_etag = format!("W/\"atlas-{}\"", bundle::checksum16_of(&atlas.to_string()));
+    let atlas_etag = format!("\"atlas-{}\"", bundle::checksum16_of(&atlas));
     Ok(Arc::new(AppState {
         bundle: Arc::new(b),
         pool,
@@ -344,21 +347,36 @@ fn round1(v: f64) -> f64 {
 /// no database read: there is no individual in the numerator. Gating it would suppress small
 /// COUNTRIES — San Marino, Tuvalu — on a privacy ground that does not exist, turning a published UN
 /// figure into "no data".
+///
+/// The load-bearing proof of that is not the test but the type: `build_atlas` takes `&Bundle` and
+/// nothing else, and runs in `init_state` before a router exists, so it CANNOT read user data. The
+/// test's anonymous-equals-authenticated assertion earns its keep for a different reason — a body
+/// that varied by caller, served `public` with no `Vary`, would be a shared-cache poisoning bug.
 async fn atlas_route(State(s): State<Arc<AppState>>, headers: HeaderMap) -> Response {
     if headers
         .get("if-none-match")
         .and_then(|v| v.to_str().ok())
         .is_some_and(|v| v.split(',').any(|t| t.trim() == s.atlas_etag))
     {
-        return (StatusCode::NOT_MODIFIED, [("etag", s.atlas_etag.clone())]).into_response();
+        // Cache-Control is echoed on the 304 as well: a revalidating cache should not have to
+        // remember the freshness it was given the first time.
+        return (
+            StatusCode::NOT_MODIFIED,
+            [
+                ("etag", s.atlas_etag.clone()),
+                ("cache-control", "public, max-age=86400".to_string()),
+            ],
+        )
+            .into_response();
     }
     (
         [
             ("etag", s.atlas_etag.clone()),
             // A day: these numbers change when a bundle ships, and the ETag catches that sooner.
             ("cache-control", "public, max-age=86400".to_string()),
+            ("content-type", "application/json".to_string()),
         ],
-        Json((*s.atlas).clone()),
+        (*s.atlas).clone(),
     )
         .into_response()
 }

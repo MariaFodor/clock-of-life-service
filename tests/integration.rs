@@ -1756,7 +1756,10 @@ fn the_map_and_the_clock_are_the_same_number() {
         let s = state().await;
         let atlas = body_json(call(&s, get("/api/atlas")).await).await;
         let countries = atlas["countries"].as_array().expect("countries");
-        assert!(countries.len() >= 230, "the atlas draws the world, not the scoreable subset");
+        // Exactly, not a floor. The point of the k-anonymity test below is that nothing may silently
+        // drop a small country; `>= 230` would have let seven of them vanish and still passed.
+        assert_eq!(countries.len(), s.bundle.reference.len(),
+                   "every country the bundle can draw must reach the map");
         assert_eq!(countries.iter().filter(|c| c["scoreable"] == true).count(), 30,
                    "exactly the countries /api/meta promises");
 
@@ -1791,6 +1794,14 @@ fn the_map_and_the_clock_are_the_same_number() {
         let map = ro["le60"]["m"].as_f64().unwrap();
         assert!(clock > map, "a below-average-risk man should outlive the average ({clock} vs {map})");
         assert!(clock - map < 12.0, "but not by an implausible margin ({clock} vs {map})");
+
+        // A synthetic anchor for the derivation itself, which otherwise has only a 10x-wide range
+        // check on one country: a constant hazard of 0.01 over the 45 years from 15 to 59 must give
+        // 1000 * (1 - 0.99^45) = 363.8145.
+        let flat: std::collections::HashMap<String, f64> =
+            (0..=100).map(|a| (a.to_string(), 0.01)).collect();
+        let anchored = clock_of_life_service::scoring::adult_mortality_15_60(&flat);
+        assert!((anchored - 363.8145).abs() < 0.001, "45q15 of a flat 1% hazard was {anchored}");
 
         // The derived 15-60 mortality must be a probability per 1,000, not a stray fraction.
         let am = ro["am"]["m"].as_f64().unwrap();
