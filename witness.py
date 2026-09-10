@@ -14,7 +14,8 @@ import time
 import urllib.error
 import urllib.request
 
-BASE = "http://127.0.0.1:8080"
+import os
+BASE = os.environ.get("CLOCK_BASE", "http://127.0.0.1:8080")   # matches the service's CLOCK_ADDR
 checks = []
 
 
@@ -91,8 +92,21 @@ def main():
         check("GET /health 200", get("/health")[0] == 200)
 
         s, meta = get("/api/meta")
-        check("GET /api/meta model 3.0.1", meta.get("model_version") == "3.0.1", str(meta.get("model_version")))
-        check("meta lists 30 countries", len(meta.get("countries", [])) == 30, str(len(meta.get("countries", []))))
+        check("GET /api/meta model 4.0.0", meta.get("model_version") == "4.0.0", str(meta.get("model_version")))
+        # Still 30, and that is the point: the bundle now carries 237 life tables so the atlas can
+        # draw the world, while /api/meta keeps promising only the countries that can be CENTRED.
+        # If this ever reads 237, every non-European user is being scored against a US cohort mean.
+        check("meta still promises only the 30 countries that can be scored",
+              len(meta.get("countries", [])) == 30, str(len(meta.get("countries", []))))
+        el_status, _ = post("/api/estimate", {"country": "EL", "age": 50, "sex": "F", "smoke": 1,
+                                             "pa_min": 200, "sleep": 7, "waist": 85})
+        check("Greece still answers to the code Eurostat used (EL -> GR)", el_status == 200,
+              str(el_status))
+        # A country the map can draw but the clock cannot centre must be refused a personal number.
+        ng_status, _ = post("/api/estimate", {"country": "NG", "age": 45, "sex": "M", "smoke": 0,
+                                             "pa_min": 300, "sleep": 7, "waist": 90})
+        check("a reference-only country is refused a personal estimate", ng_status == 400,
+              str(ng_status))
 
         ro = {"country": "RO", "age": 40, "sex": "M", "smoke": 0, "pa_min": 2000, "sleep": 7,
               "waist": 85, "higher_educ": True, "income": 4.0}
@@ -137,7 +151,7 @@ def main():
 
         # 1. Unanswered levers and answers at their centring reference are the same number.
         #    (The bundle's references: standardizer means for diet/sedentary/stress, level "light"
-        #    for alcohol — see bundle/model-v3.0.1/coefficients.json. A bundle change makes this
+        #    for alcohol — see bundle/model-v4.0.0/coefficients.json. A bundle change makes this
         #    FAIL loudly rather than drift.) relative_risk is compared too: it is rounded to 3 dp
         #    against the years' 1 dp, so it catches a centring drift ~6x smaller.
         at_reference = {**plain, "diet_score": 2.5, "sitting_hours": 6.0,

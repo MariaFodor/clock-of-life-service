@@ -277,7 +277,12 @@ pub fn literature_lp(p: &Profile, coefs: &Coefficients) -> f64 {
 
 /// Precise relative risk for a profile, plus the resolved country baseline.
 fn risk<'a>(bundle: &'a Bundle, p: &Profile) -> Result<(f64, &'a Baseline), String> {
-    let base = bundle.baselines.get(&p.country)
+    // One place, at the only function that resolves a baseline. Eurostat called Greece EL and this
+    // bundle calls it GR: stored `calculation.inputs` rows and deployed clients still send EL, and no
+    // test in either repo sends it — so the rename would have surfaced as existing users getting "no
+    // baseline for country EL" on their next estimate, which nothing would have caught.
+    let country = bundle.manifest.country_aliases.get(&p.country).unwrap_or(&p.country);
+    let base = bundle.baselines.get(country)
         .ok_or_else(|| format!("no baseline for country {}", p.country))?;
     // Cohort-fitted linear predictor + the location ENV term (context; 0 for a location-less profile,
     // and 0 for an average-location user, so the national-average reference is unaffected).
@@ -709,7 +714,7 @@ mod tests {
     use std::path::Path;
 
     fn bundle() -> Bundle {
-        Bundle::load(Path::new("bundle/model-v3.0.1")).expect("bundle loads")
+        Bundle::load(Path::new("bundle/model-v4.0.0")).expect("bundle loads")
     }
 
     #[test]
