@@ -962,7 +962,7 @@ fn openapi_lists_all_routes() {
         "/api/questions",
         "/api/ontology", "/api/references", "/api/locations", "/api/aggregates", "/api/atlas",
         "/api/estimate", "/api/recommendations", "/api/whatif", "/api/relocate",
-        "/api/places/{iso3}",
+        "/api/places/{iso3}", "/api/atlas/environment",
         "/api/calculations", "/api/answers", "/api/profile", "/api/profile/location",
         "/api/account/export", "/api/account",
         "/api/admin/audit", "/api/admin/questions", "/api/admin/questions/{code}",
@@ -992,6 +992,7 @@ fn spa_served_with_fallback() {
         web_dist: dir.to_string_lossy().to_string(),
         atlas: s.atlas.clone(), atlas_etag: s.atlas_etag.clone(),
         places: s.places.clone(),
+        environment: s.environment.clone(), environment_etag: s.environment_etag.clone(),
     });
 
     // A deep link (no such file) falls back to index.html.
@@ -2000,6 +2001,71 @@ fn places_endpoint_is_real_and_says_what_is_missing() {
     // ETag round-trip: a revalidating client gets 304 and no body.
     let req = axum::http::Request::builder()
         .method("GET").uri("/api/places/ROU")
+        .header("if-none-match", &etag)
+        .body(Body::empty()).unwrap();
+    assert_eq!(call(&s, req).await.status(), StatusCode::NOT_MODIFIED);
+    });
+}
+
+/// API: where the air has been measured, and — the load-bearing half — where it has not.
+#[test]
+fn environment_layer_says_where_there_is_no_measurement() {
+    RT.block_on(async {
+    let s = state().await;
+    let resp = call(&s, get("/api/atlas/environment")).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let etag = resp.headers().get("etag").unwrap().to_str().unwrap().to_string();
+    let r = body_json(resp).await;
+
+    let points = r["points"].as_array().unwrap();
+    assert_eq!(points.len(), 3521, "every measured settlement is drawable");
+    assert!(points.iter().all(|p| {
+        let lat = p["lat"].as_f64().unwrap();
+        let lon = p["lon"].as_f64().unwrap();
+        (-90.0..=90.0).contains(&lat) && (-180.0..=180.0).contains(&lon)
+    }), "every point is on Earth");
+    assert!(points.iter().all(|p| (2020..=2025).contains(&p["year"].as_i64().unwrap())),
+            "every reading is inside the declared window");
+
+    // The radius travels with the data rather than being written into the page: it is the same 25 km
+    // the greenness join used, and the two claims must not be able to drift apart.
+    assert_eq!(r["speaks_for_km"], 25);
+    assert_eq!(r["window"], json!([2020, 2025]));
+
+    // The absence, stated rather than left to subtraction.
+    let unmeasured = r["unmeasured_iso3"].as_array().unwrap();
+    assert_eq!(unmeasured.len(), 152, "152 of the 237 drawn countries have no measurement since 2020");
+    let measured: std::collections::HashSet<&str> =
+        points.iter().map(|p| p["iso3"].as_str().unwrap()).collect();
+    assert!(unmeasured.iter().all(|i| !measured.contains(i.as_str().unwrap())),
+            "no country is both measured and unmeasured");
+    assert!(unmeasured.iter().any(|i| i == "TCD"), "Chad is among them");
+    assert!(!unmeasured.iter().any(|i| i == "ROU"), "Romania is not");
+
+    // The licence the page has to show, because WHO's air data is share-alike.
+    let licences = r["licences"].as_array().unwrap();
+    assert!(licences.iter().any(|l| l["share_alike"] == true && l["licence"] == "CC BY-NC-SA 3.0 IGO"),
+            "the inherited share-alike licence travels with the data");
+
+    // And the same absence is visible on the atlas itself, so a page that has only loaded the country
+    // table can already grey the right countries — an empty dot layer must never be the only signal.
+    let atlas = body_json(call(&s, get("/api/atlas")).await).await;
+    let rows = atlas["countries"].as_array().unwrap();
+    let chad = rows.iter().find(|c| c["iso3"] == "TCD").unwrap();
+    assert_eq!(chad["env"]["settlements"], 0, "Chad has no measured settlement");
+    assert!(chad["env"]["pm25"].as_f64().unwrap() > 0.0,
+            "but it DOES have a national figure — no dot is not the same as no data");
+
+    let ro = rows.iter().find(|c| c["iso3"] == "ROU").unwrap();
+    assert_eq!(ro["env"]["settlements"], 60);
+    assert_eq!(ro["env"]["latest_year"], 2024);
+    assert_eq!(ro["env"]["ndvi_cities"], 1, "Romania's greenness rests on one city, and it says so");
+    let zero = rows.iter().filter(|c| c["env"]["settlements"] == 0).count();
+    assert_eq!(zero, 152, "the atlas and the layer agree on how many are unmeasured");
+
+    // ETag round-trip — this is the biggest public payload the service serves.
+    let req = axum::http::Request::builder()
+        .method("GET").uri("/api/atlas/environment")
         .header("if-none-match", &etag)
         .body(Body::empty()).unwrap();
     assert_eq!(call(&s, req).await.status(), StatusCode::NOT_MODIFIED);

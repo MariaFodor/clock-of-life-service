@@ -88,6 +88,9 @@ pub struct AppState {
     /// prices cannot drift — this product has already shipped one map that disagreed with its own clock
     /// by 3.6 years because a second copy of the data existed.
     pub places: HashMap<String, (Arc<String>, String)>,
+    /// Pre-serialized measured-settlement points for the map's air layer, with its own validator.
+    pub environment: Arc<String>,
+    pub environment_etag: String,
 }
 
 /// Connection string for the application database (unix socket + peer auth by default).
@@ -136,6 +139,8 @@ pub async fn init_state(bundle_dir: &str, database_url: &str) -> Result<Arc<AppS
     // would otherwise serve a stale cached map.
     let atlas_etag = format!("\"atlas-{}\"", bundle::checksum16_of(&atlas));
     let places = build_places(&b);
+    let environment = Arc::new(build_environment(&b).to_string());
+    let environment_etag = format!("\"env-{}\"", bundle::checksum16_of(&environment));
     Ok(Arc::new(AppState {
         bundle: Arc::new(b),
         pool,
@@ -148,6 +153,8 @@ pub async fn init_state(bundle_dir: &str, database_url: &str) -> Result<Arc<AppS
         atlas,
         atlas_etag,
         places,
+        environment,
+        environment_etag,
     }))
 }
 
@@ -169,6 +176,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/recommendations", post(recommendations_route))
         .route("/api/relocate", post(relocate_route))
         .route("/api/places/:iso3", get(places_route))
+        .route("/api/atlas/environment", get(environment_route))
         .route("/api/whatif", post(whatif_route))
         .route("/api/calculations", get(calculations_route))
         .route("/api/profile", get(profile_route))
@@ -311,6 +319,18 @@ async fn health(State(s): State<Arc<AppState>>) -> (StatusCode, Json<serde_json:
 /// `scoreable` is DERIVED from the loaded baselines rather than stored, because a stored flag is a
 /// thing that can disagree with reality.
 fn build_atlas(b: &Bundle) -> serde_json::Value {
+    // How many measured settlements each country has. Counted here rather than asked for per country,
+    // because the single most important thing this map has to say about the air is WHERE THERE IS NO
+    // MEASUREMENT — 152 of the 237 countries drawn — and a country that greys out silently reads as
+    // clean air. That claim has to arrive with the atlas the page already loads, not behind a second
+    // request that may not finish.
+    let mut settlements: HashMap<&str, (usize, i32)> = HashMap::new();
+    for p in &b.places {
+        let e = settlements.entry(p.iso3.as_str()).or_insert((0, 0));
+        e.0 += 1;
+        e.1 = e.1.max(p.pm25_year);
+    }
+
     let mut countries: Vec<serde_json::Value> = b
         .reference
         .values()
@@ -332,6 +352,27 @@ fn build_atlas(b: &Bundle) -> serde_json::Value {
                 "le0": by_sex(&|qx| scoring::remaining_le(qx, 0, 1.0)),
                 "le60": by_sex(&|qx| scoring::remaining_le(qx, 60, 1.0)),
                 "am": by_sex(&scoring::adult_mortality_15_60),
+                // The environment SUMMARY, not the readings. `settlements: 0` is the honest statement
+                // the map needs and is deliberately not the same as a missing key: 0 means "nobody has
+                // published a PM2.5 measurement for any settlement here since 2020", which is a fact
+                // about the measurement rather than about the country, and the page says it in those
+                // words. `reference` is the national figure, which exists for 227 countries even where
+                // no city does — so a country with no dot can still have a number.
+                // SUMMARY fields only, and deliberately not the whole `env_reference`: attaching that
+                // to all 237 rows took the payload from 55 KB to 124 KB, past the cap this endpoint has
+                // for a reason (the five residence-area splits and up to ten city names each). The full
+                // reference is already served per country by /api/places/{iso3}, where a reader who has
+                // picked a country is the only one who needs it.
+                "env": {
+                    "settlements": r.iso3.as_deref().and_then(|i| settlements.get(i)).map_or(0, |s| s.0),
+                    "latest_year": r.iso3.as_deref().and_then(|i| settlements.get(i)).map(|s| s.1),
+                    "pm25": r.env_reference.as_ref().map(|e| e.pm25),
+                    "pm25_year": r.env_reference.as_ref().and_then(|e| e.pm25_year),
+                    "ndvi": r.env_reference.as_ref().and_then(|e| e.ndvi),
+                    // How thin the greenness figure is — 22 of the 30 scoreable countries rest on one
+                    // city, and a page that draws the number has to be able to say so.
+                    "ndvi_cities": r.env_reference.as_ref().map(|e| e.ndvi_cities),
+                },
             })
         })
         .collect();
@@ -392,6 +433,57 @@ async fn atlas_route(State(s): State<Arc<AppState>>, headers: HeaderMap) -> Resp
         .into_response()
 }
 
+/// Every measured settlement as a drawable point, for the map's air layer.
+///
+/// Separate from `/api/atlas` and loaded only when a reader switches the layer on: 3,521 coordinate
+/// pairs are an order of magnitude more bytes than the whole country table, and most readers never ask
+/// for them. Kept to the fields a dot and its hover need, which is why there is no greenness here — a
+/// value that is usually the COUNTRY's figure cannot be drawn as a property of a point, and the country
+/// layer already carries it.
+fn build_environment(b: &Bundle) -> serde_json::Value {
+    let mut points: Vec<serde_json::Value> = b
+        .places
+        .iter()
+        .map(|p| {
+            json!({
+                "iso3": p.iso3,
+                "city": p.city,
+                "lat": p.lat,
+                "lon": p.lon,
+                "pm25": p.pm25,
+                "year": p.pm25_year,
+            })
+        })
+        .collect();
+    // Sorted for a stable ETag, as the atlas is.
+    points.sort_by(|a, c| {
+        (a["iso3"].as_str(), a["city"].as_str()).cmp(&(c["iso3"].as_str(), c["city"].as_str()))
+    });
+    let measured: std::collections::HashSet<&str> =
+        b.places.iter().map(|p| p.iso3.as_str()).collect();
+    // Countries the atlas DRAWS and nobody has measured. Computed here so the page never has to derive
+    // an absence by subtraction — the arithmetic that produces an off-by-one nobody notices.
+    let mut unmeasured: Vec<&str> = b
+        .reference
+        .values()
+        .filter_map(|r| r.iso3.as_deref())
+        .filter(|iso3| !measured.contains(iso3))
+        .collect();
+    unmeasured.sort_unstable();
+    json!({
+        "model_version": b.manifest.version,
+        "pollutant": "PM2.5, annual mean, µg/m³",
+        // The radius each reading is being claimed to speak for. Served rather than hardcoded in the
+        // page, because it is the join tolerance the greenness match also used and the two must agree.
+        "speaks_for_km": 25,
+        "window": [2020, 2025],
+        "points": points,
+        "unmeasured_iso3": unmeasured,
+        "sources": b.manifest.env_sources,
+        "licences": b.manifest.licences,
+    })
+}
+
 /// Group the bundle's settlements by ISO3 and serialize each group once, with its own strong ETag.
 ///
 /// Takes `&Bundle` and nothing else — the same purity argument as `build_atlas`: it runs in
@@ -449,7 +541,7 @@ fn build_places(b: &Bundle) -> HashMap<String, (Arc<String>, String)> {
 /// Every measured settlement in one country (public — powers the home-location picker).
 ///
 /// 404 rather than an empty list when a country has no settlements: "no measurement since 2020" is a
-/// fact about 153 of the 237 countries the atlas draws, and an empty array reads as a loading bug.
+/// fact about 152 of the 237 countries the atlas draws, and an empty array reads as a loading bug.
 async fn places_route(
     State(s): State<Arc<AppState>>,
     AxumPath(iso3): AxumPath<String>,
@@ -485,6 +577,33 @@ async fn places_route(
             ("content-type", "application/json".to_string()),
         ],
         (**body).clone(),
+    )
+        .into_response()
+}
+
+/// Where the air has been measured, and where it has not.
+async fn environment_route(State(s): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if headers
+        .get("if-none-match")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.split(',').any(|t| t.trim() == s.environment_etag))
+    {
+        return (
+            StatusCode::NOT_MODIFIED,
+            [
+                ("etag", s.environment_etag.clone()),
+                ("cache-control", "public, max-age=86400".to_string()),
+            ],
+        )
+            .into_response();
+    }
+    (
+        [
+            ("etag", s.environment_etag.clone()),
+            ("cache-control", "public, max-age=86400".to_string()),
+            ("content-type", "application/json".to_string()),
+        ],
+        (*s.environment).clone(),
     )
         .into_response()
 }

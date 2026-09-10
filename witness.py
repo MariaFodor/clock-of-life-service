@@ -265,6 +265,18 @@ def main():
         check("interview: the home location reads back on the profile",
               bool(s == 200 and profile.get("home_location_id")), str(s))
 
+        s, env = get("/api/atlas/environment")
+        check("environment: every measured settlement is drawable",
+              s == 200 and len(env.get("points", [])) == 3521,
+              f"{s} / {len(env.get('points', []))}")
+        check("environment: the unmeasured countries are stated, not left to subtraction",
+              len(env.get("unmeasured_iso3", [])) == 152 and "TCD" in env.get("unmeasured_iso3", []),
+              str(len(env.get("unmeasured_iso3", []))))
+        check("environment: the radius a reading speaks for travels with the data",
+              env.get("speaks_for_km") == 25, str(env.get("speaks_for_km")))
+        check("environment: the inherited share-alike licence is served with it",
+              any(l.get("share_alike") for l in env.get("licences") or []))
+
         s, pl = get("/api/places/ROU")
         check("places: Romania lists 60 measured settlements, not 7 invented ones",
               s == 200 and len(pl.get("places", [])) == 60,
