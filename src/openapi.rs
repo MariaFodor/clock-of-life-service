@@ -56,6 +56,7 @@ pub fn openapi_doc() -> Value {
             "/api/ontology": { "get": op("Model ontology: roles, causal graph, verified article links", false, "evidence") },
             "/api/references": { "get": op("Evidence studies; ?feature= or ?rule= filters", false, "evidence") },
             "/api/locations": { "get": op("Locations with PM2.5 / greenspace", false, "environment") },
+            "/api/atlas": { "get": op("Population life expectancy and 15-60 mortality for every country the bundle carries a life table for, derived from the same integrator the Life Clock uses; ETag-cached", false, "atlas") },
             "/api/aggregates": { "get": op("k-anonymized cohort distributions", false, "aggregates") },
 
             "/api/estimate": { "post": optional_auth_op("Answers -> Life Clock + why[] + model; persists a calculation", "scoring") },

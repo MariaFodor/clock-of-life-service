@@ -942,7 +942,7 @@ fn openapi_spec_is_generator_ready() {
             }
         }
     }
-    assert!(op_count >= 26, "all operations present (got {op_count})");
+    assert!(op_count >= 27, "all operations present (got {op_count})");
     });
 }
 
@@ -958,7 +958,7 @@ fn openapi_lists_all_routes() {
     for p in [
         "/health", "/api/meta", "/api/openapi.json", "/api/auth/register", "/api/auth/login",
         "/api/questions",
-        "/api/ontology", "/api/references", "/api/locations", "/api/aggregates",
+        "/api/ontology", "/api/references", "/api/locations", "/api/aggregates", "/api/atlas",
         "/api/estimate", "/api/recommendations", "/api/whatif", "/api/relocate",
         "/api/calculations", "/api/answers", "/api/profile", "/api/profile/location",
         "/api/account/export", "/api/account",
@@ -987,6 +987,7 @@ fn spa_served_with_fallback() {
         anon_account_id: s.anon_account_id, anon_profile_id: s.anon_profile_id,
         jwt_secret: s.jwt_secret.clone(), token_ttl_secs: s.token_ttl_secs,
         web_dist: dir.to_string_lossy().to_string(),
+        atlas: s.atlas.clone(), atlas_etag: s.atlas_etag.clone(),
     });
 
     // A deep link (no such file) falls back to index.html.
@@ -1742,4 +1743,120 @@ fn a_reference_country_with_no_life_table_is_refused_at_load() {
         .expect("a reference country with an empty life table must be refused");
     std::fs::remove_dir_all(&dir).ok();
     assert!(err.contains("is empty"), "got: {err}");
+}
+
+/// W-A5: the atlas is the model's own baselines made visible.
+///
+/// The claim this endpoint exists to make is that the map and the Life Clock cannot disagree, and the
+/// only way to hold that claim is to check the two numbers against each other. If this test ever
+/// fails, the map has become a second dataset.
+#[test]
+fn the_map_and_the_clock_are_the_same_number() {
+    RT.block_on(async {
+        let s = state().await;
+        let atlas = body_json(call(&s, get("/api/atlas")).await).await;
+        let countries = atlas["countries"].as_array().expect("countries");
+        // Exactly, not a floor. The point of the k-anonymity test below is that nothing may silently
+        // drop a small country; `>= 230` would have let seven of them vanish and still passed.
+        assert_eq!(countries.len(), s.bundle.reference.len(),
+                   "every country the bundle can draw must reach the map");
+        assert_eq!(countries.iter().filter(|c| c["scoreable"] == true).count(), 30,
+                   "exactly the countries /api/meta promises");
+
+        let ro = countries.iter().find(|c| c["iso2"] == "RO").expect("Romania");
+        assert_eq!(ro["iso3"], "ROU");
+        assert_eq!(ro["name"], "Romania");
+
+        // The load-bearing check, and it crosses both a language and a repo boundary. The bundle's
+        // `national_le_40` was computed by the MODEL, in Python, by its own `remaining_le`. The atlas
+        // computes its numbers here, in Rust, by this repo's port of the same function. If the two
+        // implementations ever drift, the map and the clock stop being the same arithmetic — which is
+        // the entire claim this endpoint exists to make — and nothing else would notice.
+        let base = s.bundle.reference.get("RO").expect("RO reference baseline");
+        for sex in ["M", "F"] {
+            let ours = clock_of_life_service::scoring::remaining_le(&base.qx[sex], 40, 1.0);
+            let model = s.bundle.baselines["RO"].national_le_40[sex];
+            assert!((ours - model).abs() < 0.01,
+                    "Rust says {ours} at 40 where the Python model shipped {model} for RO/{sex}");
+        }
+        // And the served figures are that same function, untransformed.
+        let expect60 = clock_of_life_service::scoring::remaining_le(&base.qx["M"], 60, 1.0);
+        assert!((ro["le60"]["m"].as_f64().unwrap() - expect60).abs() <= 0.05);
+
+        // What the map is NOT. This man is a never-smoker with 600 MET-minutes and no conditions, so
+        // his relative risk is below the Romanian average and he beats the population figure — by
+        // design, and by a margin the reader must never be invited to subtract. It is asserted here so
+        // that the difference stays a deliberate property rather than a surprise.
+        let healthy = json!({"country": "RO", "age": 60, "sex": "M", "smoke": 0, "pa_min": 600,
+                             "sleep": 7.5, "waist": 94, "diabetes": false, "high_bp": false});
+        let est = body_json(call(&s, post("/api/estimate", healthy)).await).await;
+        let clock = est["estimate_years"].as_f64().unwrap();
+        let map = ro["le60"]["m"].as_f64().unwrap();
+        assert!(clock > map, "a below-average-risk man should outlive the average ({clock} vs {map})");
+        assert!(clock - map < 12.0, "but not by an implausible margin ({clock} vs {map})");
+
+        // A synthetic anchor for the derivation itself, which otherwise has only a 10x-wide range
+        // check on one country: a constant hazard of 0.01 over the 45 years from 15 to 59 must give
+        // 1000 * (1 - 0.99^45) = 363.8145.
+        let flat: std::collections::HashMap<String, f64> =
+            (0..=100).map(|a| (a.to_string(), 0.01)).collect();
+        let anchored = clock_of_life_service::scoring::adult_mortality_15_60(&flat);
+        assert!((anchored - 363.8145).abs() < 0.001, "45q15 of a flat 1% hazard was {anchored}");
+
+        // The derived 15-60 mortality must be a probability per 1,000, not a stray fraction.
+        let am = ro["am"]["m"].as_f64().unwrap();
+        assert!(am > 50.0 && am < 500.0, "45q15 out of range: {am}");
+        // Women outlive men essentially everywhere, and Romania is not the exception.
+        assert!(ro["le0"]["f"].as_f64().unwrap() > ro["le0"]["m"].as_f64().unwrap());
+
+        // Provenance travels with the numbers, so the page attributes what it draws from the
+        // artifact rather than from a string somebody typed into the front end.
+        let src = &atlas["sources"][0];
+        assert!(src["dataset"].as_str().unwrap().contains("World Population Prospects"));
+        assert_eq!(src["licence"], "CC BY 3.0 IGO");
+        assert!(src["retrieved"].as_str().is_some());
+    });
+}
+
+/// The atlas is a pure function of the bundle: no database read, no per-caller variation, no
+/// k-anonymity. `/api/aggregates` gates at k=20 because it summarises this platform's OWN USERS'
+/// calculations; this summarises a published national life table for a whole country's population.
+/// Gating it would suppress small COUNTRIES on a privacy ground that does not exist. Rather than
+/// write that in a comment a future contributor can helpfully "fix", prove it.
+#[test]
+fn the_atlas_is_public_population_data_not_user_data() {
+    RT.block_on(async {
+        let s = state().await;
+        let anon = body_json(call(&s, get("/api/atlas")).await).await;
+
+        let token = register_token(&s).await;
+        let with_auth = body_json(call(&s, get_auth("/api/atlas", &token)).await).await;
+        assert_eq!(anon, with_auth, "who is asking must not change a published UN figure");
+
+        let body = anon.to_string();
+        assert!(!body.contains("suppressed") && !body.contains("min_group"),
+                "population data must not carry the user-data suppression vocabulary");
+        // San Marino has 34,000 people. Under k-anonymity it would vanish; here it is just a country.
+        assert!(anon["countries"].as_array().unwrap().iter().any(|c| c["iso2"] == "SM"),
+                "a small country is still a country");
+    });
+}
+
+/// 55 KB per visit, unchanged between bundles, is worth one conditional request.
+#[test]
+fn the_atlas_is_cached_by_its_own_content() {
+    RT.block_on(async {
+        let s = state().await;
+        let resp = call(&s, get("/api/atlas")).await;
+        let etag = resp.headers().get("etag").expect("etag").to_str().unwrap().to_string();
+        assert!(resp.headers().get("cache-control").is_some());
+        let body = body_json(resp).await;
+        // Under 120 KB: the bundle holds 237 x 3 x 101 qx values and the wire must never carry them.
+        assert!(body.to_string().len() < 120_000, "atlas payload is {} bytes", body.to_string().len());
+
+        let mut req = axum::http::Request::builder().uri("/api/atlas");
+        req = req.header("if-none-match", &etag);
+        let second = call(&s, req.body(axum::body::Body::empty()).unwrap()).await;
+        assert_eq!(second.status(), 304, "a matching validator must not resend the world");
+    });
 }
