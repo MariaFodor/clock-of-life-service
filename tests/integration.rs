@@ -157,7 +157,7 @@ fn seeds_are_reconciled() {
     // Exclude questions created by the admin-mutation test (shared DB, parallel).
     let questions: i64 = sqlx::query_scalar("SELECT count(*) FROM question WHERE active AND code NOT LIKE 'Qtest%'")
         .fetch_one(&s.pool).await.unwrap();
-    assert_eq!(questions, 24, "24 questions seeded");
+    assert_eq!(questions, 25, "25 questions seeded");
 
     let active_models: i64 = sqlx::query_scalar("SELECT count(*) FROM model_version WHERE is_active")
         .fetch_one(&s.pool).await.unwrap();
@@ -569,16 +569,32 @@ fn answers_upsert_and_readback() {
 fn questions_and_profile() {
     RT.block_on(async {
     let s = state().await;
-    // Questions: public (no auth), all 24, ordered Q1..Q24 by numeric code.
+    // Questions: public (no auth), all 25, ordered Q0..Q24 by numeric code — Q0_country FIRST,
+    // because it chooses the life table the whole estimate counts down from.
     let resp = call(&s, get("/api/questions")).await;
     assert_eq!(resp.status(), StatusCode::OK);
     let qs = body_json(resp).await;
     // Exclude any questions created by the admin-mutation test (shared DB, parallel).
     let arr: Vec<&Value> = qs.as_array().unwrap().iter()
         .filter(|q| !q["code"].as_str().unwrap().starts_with("Qtest")).collect();
-    assert_eq!(arr.len(), 24, "24 questions served");
-    assert_eq!(arr[0]["code"], "Q1_age");
-    assert_eq!(arr[9]["code"], "Q10_sedentary", "numeric order (Q10 after Q9, not after Q1)");
+    assert_eq!(arr.len(), 25, "25 questions served");
+    assert_eq!(arr[0]["code"], "Q0_country", "the country is asked first, not assumed");
+    assert_eq!(arr[0]["required"], true, "and it is not optional: there is no default country");
+    assert_eq!(arr[0]["input_type"], "country",
+               "the options come from the bundle's own country list, not a copy in the seed");
+
+    // …and that list is served, with names, so the front end never keeps a copy of 30 country names.
+    let meta = body_json(call(&s, get("/api/meta")).await).await;
+    let options = meta["country_options"].as_array().unwrap();
+    assert_eq!(options.len(), meta["countries"].as_array().unwrap().len(),
+               "one option per scoreable country, no more and no fewer");
+    assert!(options.iter().all(|o| o["name"].is_string() && o["iso3"].is_string()),
+            "every option can be shown to a reader and used to fetch its settlements");
+    let ro = options.iter().find(|o| o["iso2"] == "RO").unwrap();
+    assert_eq!(ro["iso3"], "ROU");
+    assert_eq!(ro["settlements"], 60, "the picker can say up front what the city question will hold");
+    assert_eq!(arr[1]["code"], "Q1_age");
+    assert_eq!(arr[10]["code"], "Q10_sedentary", "numeric order (Q10 after Q9, not after Q1)");
 
     // Profile: requires auth, returns the caller's saved answers.
     assert_eq!(call(&s, get("/api/profile")).await.status(), StatusCode::UNAUTHORIZED);
@@ -1320,7 +1336,7 @@ fn admin_question_codes_are_safe() {
 
     // A valid but truly digit-less code is accepted and the public listing survives it — the old
     // `(regexp_replace(code,'[^0-9]','','g'))::int` ORDER BY crashed on '' with a 500. The Qtest
-    // prefix keeps the row out of the other tests' exactly-24-questions assertions.
+    // prefix keeps the row out of the other tests' exactly-25-questions assertions.
     let code = "QtestNODIGITS";
     sqlx::query("DELETE FROM question WHERE code = $1").bind(code).execute(&s.pool).await.unwrap(); // leftover from a crashed run
     let body = json!({"code": code, "section": "S", "text": "t?", "input_type": "number", "citation": "c"});
