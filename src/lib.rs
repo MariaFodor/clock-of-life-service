@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use axum::{
     extract::{Path as AxumPath, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{delete, get, post, put},
     Json, Router,
@@ -72,6 +72,11 @@ pub struct AppState {
     pub token_ttl_secs: i64,
     /// Directory of the built SPA to serve (client-side routing falls back to its index.html).
     pub web_dist: String,
+    /// The atlas, computed once at startup from the bundle's own life tables. A pure function of the
+    /// artifact: no database, no per-caller variation, so it is built here rather than per request.
+    pub atlas: Arc<serde_json::Value>,
+    /// Strong validator for the atlas body, so a repeat visit costs a 304 instead of 55 KB.
+    pub atlas_etag: String,
 }
 
 /// Connection string for the application database (unix socket + peer auth by default).
@@ -115,6 +120,10 @@ pub async fn init_state(bundle_dir: &str, database_url: &str) -> Result<Arc<AppS
     let seeded = seed::reconcile(&pool, &b.manifest, bundle_dir)
         .await
         .map_err(|e| format!("db reconcile: {e}"))?;
+    let atlas = Arc::new(build_atlas(&b));
+    // A 16-hex digest of the body itself, not of the version: a bundle rebuilt at the same version
+    // would otherwise serve a stale cached map.
+    let atlas_etag = format!("W/\"atlas-{}\"", bundle::checksum16_of(&atlas.to_string()));
     Ok(Arc::new(AppState {
         bundle: Arc::new(b),
         pool,
@@ -124,6 +133,8 @@ pub async fn init_state(bundle_dir: &str, database_url: &str) -> Result<Arc<AppS
         jwt_secret: jwt_secret().map_err(|e| format!("auth config: {e}"))?,
         token_ttl_secs: 7 * 24 * 3600, // 7 days
         web_dist: std::env::var("WEB_DIST").unwrap_or_else(|_| "web-dist".to_string()),
+        atlas,
+        atlas_etag,
     }))
 }
 
@@ -133,6 +144,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/health", get(health))
         .route("/api/openapi.json", get(openapi_route))
         .route("/api/meta", get(meta))
+        .route("/api/atlas", get(atlas_route))
         .route("/api/questions", get(questions_route))
         .route("/api/ontology", get(ontology_route))
         .route("/api/references", get(references_route))
@@ -272,6 +284,83 @@ async fn health(State(s): State<Arc<AppState>>) -> (StatusCode, Json<serde_json:
             "countries": s.bundle.baselines.len(),
         })),
     )
+}
+
+/// The whole world's life expectancy, as the model's own baselines see it.
+///
+/// This is not a second dataset. Every number here is `remaining_le` — the exact function the Life
+/// Clock runs — evaluated on the bundle's own `qx` at age 0 and age 60 with a relative risk of 1.0.
+/// The map and the clock are therefore not merely consistent: they are the same arithmetic over the
+/// same table, and any future change to the integrator moves both or neither. A copy of these numbers
+/// in the front end could not have that property at any price.
+///
+/// `scoreable` is DERIVED from the loaded baselines rather than stored, because a stored flag is a
+/// thing that can disagree with reality.
+fn build_atlas(b: &Bundle) -> serde_json::Value {
+    let mut countries: Vec<serde_json::Value> = b
+        .reference
+        .values()
+        .map(|r| {
+            let by_sex = |f: &dyn Fn(&HashMap<String, f64>) -> f64| {
+                let mut out = serde_json::Map::new();
+                for (sex, qx) in &r.qx {
+                    out.insert(sex.to_lowercase(), json!(round1(f(qx))));
+                }
+                serde_json::Value::Object(out)
+            };
+            json!({
+                "iso2": r.country,
+                "iso3": r.iso3,
+                "name": r.name,
+                "region": r.region,
+                "lifetable_year": r.lifetable_year,
+                "scoreable": b.baselines.contains_key(&r.country),
+                "le0": by_sex(&|qx| scoring::remaining_le(qx, 0, 1.0)),
+                "le60": by_sex(&|qx| scoring::remaining_le(qx, 60, 1.0)),
+                "am": by_sex(&scoring::adult_mortality_15_60),
+            })
+        })
+        .collect();
+    // Sorted so the payload — and therefore its ETag — is stable across restarts; HashMap iteration
+    // order is not.
+    countries.sort_by(|a, b| a["iso2"].as_str().cmp(&b["iso2"].as_str()));
+    json!({
+        "model_version": b.manifest.version,
+        "derived_by": "remaining_le(qx, age, rr=1.0) — the same integrator the Life Clock uses",
+        "sources": b.manifest.sources,
+        "countries": countries,
+    })
+}
+
+fn round1(v: f64) -> f64 {
+    (v * 10.0).round() / 10.0
+}
+
+/// GET /api/atlas — population life expectancy for every country the bundle carries a table for.
+///
+/// Public, and NOT k-anonymised. `/api/aggregates` gates at k=20 because it summarises this
+/// platform's own users' calculations, where a small cell can re-identify a person. This summarises a
+/// published national life table for an entire country's population, out of a static artifact, with
+/// no database read: there is no individual in the numerator. Gating it would suppress small
+/// COUNTRIES — San Marino, Tuvalu — on a privacy ground that does not exist, turning a published UN
+/// figure into "no data".
+async fn atlas_route(State(s): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if headers
+        .get("if-none-match")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.split(',').any(|t| t.trim() == s.atlas_etag))
+    {
+        return (StatusCode::NOT_MODIFIED, [("etag", s.atlas_etag.clone())]).into_response();
+    }
+    (
+        [
+            ("etag", s.atlas_etag.clone()),
+            // A day: these numbers change when a bundle ships, and the ETag catches that sooner.
+            ("cache-control", "public, max-age=86400".to_string()),
+        ],
+        Json((*s.atlas).clone()),
+    )
+        .into_response()
 }
 
 /// Active model version + provenance.

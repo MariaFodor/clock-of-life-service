@@ -114,6 +114,11 @@ pub struct Manifest {
     /// clients still say EL, so it is normalised rather than 400ed.
     #[serde(default)]
     pub country_aliases: HashMap<String, String>,
+    /// Where the life tables came from — dataset, publisher, licence, citation, per-file digests and
+    /// a retrieval date. Served verbatim by the atlas so the page attributes what it draws from the
+    /// artifact rather than from a string somebody typed into the front end.
+    #[serde(default)]
+    pub sources: Vec<serde_json::Value>,
     pub checksums: HashMap<String, String>,
     /// Provenance used to seed the `model_version` row (optional — absent in older bundles).
     #[serde(default)]
@@ -167,6 +172,13 @@ fn checksum16(path: &Path) -> Result<String, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
     let digest = Sha256::digest(&bytes);
     Ok(hex(&digest)[..16].to_string())
+}
+
+/// The same 16-hex digest the manifest uses, over a string rather than a file — used to give the
+/// atlas payload a strong validator that changes whenever the payload does, including a rebuild at
+/// the same version.
+pub fn checksum16_of(body: &str) -> String {
+    hex(&Sha256::digest(body.as_bytes())[..8])
 }
 
 fn hex(bytes: &[u8]) -> String {
