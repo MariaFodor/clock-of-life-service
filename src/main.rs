@@ -30,8 +30,12 @@ async fn main() {
     );
 
     let app = build_router(state);
-    let addr = "127.0.0.1:8080";
-    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+    // Configurable so a second instance can run beside a first — reviewing a bundle change means
+    // having the old and the new one answering at once.
+    let addr = std::env::var("CLOCK_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".to_string());
+    let listener = tokio::net::TcpListener::bind(&addr)
+        .await
+        .unwrap_or_else(|e| panic!("cannot bind {addr}: {e} (set CLOCK_ADDR to use another port)"));
     println!("clock-of-life-service listening on http://{addr}");
     axum::serve(listener, app).await.unwrap();
 }
