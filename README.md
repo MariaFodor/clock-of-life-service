@@ -78,6 +78,6 @@ tracing, readiness health. **RES-04 is closed:** the seven illustrative Romanian
 deleted by migration `0007` rather than merely dropped from the seed, and replaced by **3,521 measured
 settlements in 85 countries** (WHO Ambient Air Quality Database v8.0, 2020–2025) with greenness from
 Stowell et al. 2023. Two caveats that remain and are stated on screen rather than here: greenness is
-per-city for only 426 of those settlements — the rest show their country's figure, labelled — and **153
+per-city for only 426 of those settlements — the rest show their country's figure, labelled — and **152
 of the 237 countries have no air measurement since 2020**. **Model residuals (MH-\*)** still gate launch-grade
 *numbers* (survey weights, coefficient tuning) — tracked in the model module.
