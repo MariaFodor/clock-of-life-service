@@ -81,11 +81,39 @@ pub struct Baseline {
     pub national_le_40: HashMap<String, f64>,
 }
 
+/// A country the atlas may DRAW but the clock may not score.
+///
+/// Deliberately a different type from `Baseline`, and deliberately without a `reference_lp` field —
+/// not an `Option`. The Cox reference person is centred on national smoking and overweight rates,
+/// which exist for Europe; a country scored without them gets a reference person built from US cohort
+/// means, and its reader gets a confident, wrong, PERSONAL number. Making that impossible to express
+/// beats making it a runtime check someone can forget: the scoring path cannot reach one of these,
+/// because the type does not carry what `risk()` needs.
+#[derive(Deserialize)]
+pub struct ReferenceBaseline {
+    pub country: String,
+    pub iso3: Option<String>,
+    pub name: Option<String>,
+    pub region: Option<String>,
+    pub lifetable_year: Option<i32>,
+    /// sex ("M"/"F"/"B") -> age (as string) -> probability of death that year
+    pub qx: HashMap<String, HashMap<String, f64>>,
+}
+
 #[derive(Deserialize)]
 pub struct Manifest {
     pub version: String,
     pub algorithm: String,
+    /// The SCOREABLE set. `/api/meta` is derived from this, and an entry here promises a person from
+    /// that country can be given a number centred on their own population.
     pub countries: Vec<String>,
+    /// Everything with a life table — a superset, for the atlas to draw. Absent in bundles before v4.
+    #[serde(default)]
+    pub reference_countries: Vec<String>,
+    /// Eurostat calls Greece EL; ISO — and this bundle — call it GR. Stored calculations and deployed
+    /// clients still say EL, so it is normalised rather than 400ed.
+    #[serde(default)]
+    pub country_aliases: HashMap<String, String>,
     pub checksums: HashMap<String, String>,
     /// Provenance used to seed the `model_version` row (optional — absent in older bundles).
     #[serde(default)]
@@ -119,6 +147,9 @@ pub struct Bundle {
     pub manifest: Manifest,
     pub coefficients: Coefficients,
     pub baselines: HashMap<String, Baseline>,
+    /// Every country with a life table, scoreable or not — what the atlas may draw. Empty for
+    /// pre-v4.0.0 bundles, which had only the scoreable set.
+    pub reference: HashMap<String, ReferenceBaseline>,
     /// feature key -> {role, grade, citation, doi, url}; empty if the bundle ships no evidence.json.
     pub evidence: HashMap<String, Evidence>,
     /// The full ontology as shipped (roles, sign/shape constraints, causal graph, verified
@@ -292,6 +323,44 @@ impl Bundle {
             let b: Baseline = read_json(&dir.join("baselines").join(format!("{iso}.json")))?;
             baselines.insert(iso.clone(), b);
         }
-        Ok(Bundle { manifest, coefficients, baselines, evidence, ontology })
+
+        // The reference set: every country the atlas may draw. Loaded into a type that cannot be
+        // scored against, so widening this list can never widen /api/meta.
+        let mut reference = HashMap::new();
+        for iso in &manifest.reference_countries {
+            let b: ReferenceBaseline = read_json(&dir.join("baselines").join(format!("{iso}.json")))?;
+            // `remaining_le` indexes pts[0] — an empty table panics inside a request handler rather
+            // than failing here, which is the wrong place for a bad bundle to be discovered.
+            for (sex, table) in &b.qx {
+                if table.is_empty() {
+                    return Err(format!(
+                        "baselines/{iso}.json: qx for sex '{sex}' is empty — refusing this bundle"
+                    ));
+                }
+            }
+            reference.insert(iso.clone(), b);
+        }
+        // Scoreable must be a subset of drawable, or /api/meta offers a country the atlas cannot show.
+        if !manifest.reference_countries.is_empty() {
+            let drawable: std::collections::HashSet<&String> =
+                manifest.reference_countries.iter().collect();
+            let missing: Vec<&String> =
+                manifest.countries.iter().filter(|c| !drawable.contains(c)).collect();
+            if !missing.is_empty() {
+                return Err(format!(
+                    "manifest: scoreable countries {missing:?} are not in reference_countries"
+                ));
+            }
+        }
+        // An alias pointing nowhere is a country that used to work and now 400s.
+        for (from, to) in &manifest.country_aliases {
+            if !baselines.contains_key(to) && !reference.contains_key(to) {
+                return Err(format!("manifest: alias {from} -> {to} resolves to no baseline"));
+            }
+            if baselines.contains_key(from) || reference.contains_key(from) {
+                return Err(format!("manifest: alias {from} shadows a real baseline"));
+            }
+        }
+        Ok(Bundle { manifest, coefficients, baselines, reference, evidence, ontology })
     }
 }

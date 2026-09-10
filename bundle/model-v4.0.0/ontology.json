@@ -1,0 +1,814 @@
+{
+  "_comment": [
+    "THE ONTOLOGY \u2014 single source of truth for what we know about each factor.",
+    "Read by: the fit (constraints + adjustment sets), the release gates (verification),",
+    "the bundle (shipped to the service), the service (roles/grades), the web (article links).",
+    "Replaces the four scattered copies (features.py, literature.py, seeds/features.json, evidence.json).",
+    "",
+    "Fields per factor:",
+    "  role          lever | manage | context | marker | baseline",
+    "  source        fitted (estimated on the cohort) | literature (prior only, not in cohort)",
+    "  sign          HARD constraint enforced in the optimizer: positive | negative | free",
+    "  shape         linear | monotone_increasing | monotone_decreasing",
+    "  causes        DOWNSTREAM nodes \u2014 mediators; NEVER adjusted for in a total-effect estimand",
+    "  confounded_by UPSTREAM common causes \u2014 always adjusted for",
+    "  prior         literature effect size with a VERIFIED doi (Crossref-checked at the stated date)",
+    "  study         slug into the service's study table",
+    "  companions    other indicators of the SAME categorical exposure \u2014 kept together so the",
+    "                reference group stays what the prior measured",
+    "  grade         strong | strong_for_harm | moderate | weak | na \u2014 the evidence grade shown to the reader",
+    "  clip_expected a sign constraint we EXPECT to bind, with clip_reason; an unexpected clip refuses",
+    "  waived_confounders  declared confounders we cannot adjust for, with waiver_reason",
+    "  intervention_evidence  sources qualifying how a factor may be ACTED ON, not the coefficient's",
+    "                value \u2014 e.g. that cutting down is worth less than the per-cigarette slope",
+    "                implies. Requires a `claim`, and each source an openable doi-or-url, a",
+    "                verification date, and which claim it supports.",
+    "  questions     interview question codes that feed this factor",
+    "  standardizer  mean/sd/source for a z-scored factor",
+    "  levels / reference_level  a categorical factor's category -> log-HR map, and which",
+    "                category the AVERAGE person is assumed to be. These are two different anchors:",
+    "                the map is anchored at its own zero (alcohol: none), the reference is where",
+    "                centring subtracts from (alcohol: light, whose log-HR is 0.03, not 0).",
+    "  prior_secondary  a second literature prior, held to the same citation bar as the first",
+    "  note / decision / assumption / companion_reason / clip_reason / waiver_reason",
+    "                prose the gates read for presence \u2014 a declared exception must say why"
+  ],
+  "_meta": {
+    "version": "1.0.0",
+    "strata": {
+      "age_bands": [
+        0,
+        45,
+        55,
+        65,
+        200
+      ],
+      "by_sex": true,
+      "rationale": "4 age bands x sex. Chosen on measured deaths per stratum (min 66) and on the sign of the young-smoking term, which is negative unstratified and positive under every candidate split. The exact figures are asserted by tests/test_golden.py rather than restated here.",
+      "measured": "2026-09-09"
+    },
+    "citations_verified_against": "https://api.crossref.org/works/{doi}",
+    "citations_verified_on": "2026-09-10"
+  },
+  "age": {
+    "role": "baseline",
+    "source": "fitted",
+    "sign": "free",
+    "questions": [
+      "Q1_age"
+    ],
+    "causes": [
+      "waist",
+      "sbp",
+      "diabetes",
+      "high_bp",
+      "respiratory",
+      "cvd_hx",
+      "cancer_hx",
+      "mobility",
+      "sleep_long"
+    ],
+    "confounded_by": [],
+    "note": "Exogenous. Not in the linear predictor: handled by age-band strata plus the national life table."
+  },
+  "sex": {
+    "role": "baseline",
+    "source": "fitted",
+    "sign": "free",
+    "questions": [
+      "Q2_sex"
+    ],
+    "causes": [
+      "waist",
+      "sbp",
+      "diabetes",
+      "cvd_hx",
+      "cancer_hx"
+    ],
+    "confounded_by": [],
+    "note": "Exogenous. Stratum dimension, not a coefficient."
+  },
+  "education": {
+    "role": "context",
+    "source": "fitted",
+    "sign": "negative",
+    "shape": "linear",
+    "questions": [
+      "Q3_education"
+    ],
+    "causes": [
+      "income",
+      "smk_current",
+      "smk_former",
+      "activity",
+      "diet",
+      "alcohol",
+      "sedentary",
+      "waist"
+    ],
+    "confounded_by": [
+      "age",
+      "sex"
+    ],
+    "study": "ses-gradient",
+    "note": "Upstream social cause of every behaviour. Explained, never recommended.",
+    "prior": {
+      "doi": "10.1056/NEJMsa0707519",
+      "title": "Socioeconomic Inequalities in Health in 22 European Countries",
+      "first_author": "Mackenbach",
+      "year": 2008,
+      "verified": "2026-09-09"
+    },
+    "grade": "moderate",
+    "clip_expected": true,
+    "clip_reason": "Education's own effect is not detectable in this cohort once the fit is stratified by age and sex: +0.0065 +/- 0.050, z = 0.13 \u2014 noise that happens to point the wrong way. The constraint holds it at 0 rather than letting that read as 'school shortens your life'; it drops out of the breakdown. Unlike waist, this is a decision over noise, not over signal."
+  },
+  "income": {
+    "role": "context",
+    "source": "fitted",
+    "sign": "negative",
+    "shape": "linear",
+    "questions": [
+      "Q4_income"
+    ],
+    "causes": [
+      "diet",
+      "activity",
+      "env",
+      "waist",
+      "smk_current"
+    ],
+    "confounded_by": [
+      "age",
+      "sex",
+      "education"
+    ],
+    "study": "ses-gradient",
+    "prior": {
+      "doi": "10.1056/NEJMsa0707519",
+      "title": "Socioeconomic Inequalities in Health in 22 European Countries",
+      "first_author": "Mackenbach",
+      "year": 2008,
+      "verified": "2026-09-09"
+    },
+    "grade": "moderate"
+  },
+  "smk_former": {
+    "role": "lever",
+    "source": "fitted",
+    "sign": "positive",
+    "shape": "linear",
+    "questions": [
+      "Q5_smoking"
+    ],
+    "causes": [
+      "respiratory",
+      "cvd_hx",
+      "cancer_hx",
+      "waist"
+    ],
+    "confounded_by": [
+      "age",
+      "sex",
+      "education",
+      "income"
+    ],
+    "prior": {
+      "log_hr": 0.26,
+      "sd": 0.1,
+      "doi": "10.1136/bmj.38142.554479.AE",
+      "title": "Mortality in relation to smoking: 50 years' observations on male British doctors",
+      "first_author": "Doll",
+      "year": 2004,
+      "verified": "2026-09-09",
+      "per": "binary"
+    },
+    "study": "smoking-doll-peto",
+    "grade": "strong",
+    "companions": [
+      "smk_current",
+      "cigs_day"
+    ],
+    "companion_reason": "Smoking is one categorical exposure: never (reference) / former / current, plus a dose term for current smokers. Former-vs-never only means what Doll 2004 measured when the other indicators are in the model \u2014 otherwise the reference group silently becomes 'everyone else'."
+  },
+  "smk_current": {
+    "role": "lever",
+    "source": "fitted",
+    "sign": "positive",
+    "shape": "linear",
+    "questions": [
+      "Q5_smoking"
+    ],
+    "causes": [
+      "respiratory",
+      "cvd_hx",
+      "cancer_hx",
+      "waist"
+    ],
+    "confounded_by": [
+      "age",
+      "sex",
+      "education",
+      "income",
+      "stress"
+    ],
+    "prior": {
+      "log_hr": 0.99,
+      "sd": 0.15,
+      "doi": "10.1056/NEJMsa1211128",
+      "title": "21st-Century Hazards of Smoking and Benefits of Cessation in the United States",
+      "first_author": "Jha",
+      "year": 2013,
+      "verified": "2026-09-09",
+      "per": "marginal_current_vs_never",
+      "blend_note": "Not blended: the fitted coefficient conditions on dose, so it estimates a different contrast than this prior. Blending them over-stated every current smoker by about 0.07 log-HR."
+    },
+    "study": "smoking-cessation",
+    "grade": "strong",
+    "note": "Quitting: the former-smoker coefficient carries sick-quitter bias, so What-If models cessation as trending to never-smoker (the causal target).",
+    "waived_confounders": [
+      "stress"
+    ],
+    "waiver_reason": "Perceived stress is a literature feature with no cohort measurement, so it cannot be adjusted for. Residual confounding by stress would, if anything, inflate the smoking coefficient.",
+    "companions": [
+      "smk_former",
+      "cigs_day"
+    ],
+    "companion_reason": "Fitted alongside smk_former and cigs_day so the reference group is 'never smoked'. Note the consequence: holding cigs_day fixed makes this coefficient 'a current smoker who smokes zero a day', a cell nobody occupies. It is therefore NOT the contrast Jha 2013 measured (current-vs-never at observed doses), which is why the prior is not blended into it."
+  },
+  "cigs_day": {
+    "role": "lever",
+    "source": "fitted",
+    "sign": "positive",
+    "shape": "monotone_increasing",
+    "questions": [
+      "Q7_cigs_per_day"
+    ],
+    "causes": [
+      "respiratory",
+      "cvd_hx",
+      "cancer_hx"
+    ],
+    "confounded_by": [
+      "age",
+      "sex",
+      "education",
+      "income"
+    ],
+    "prior": {
+      "log_hr": 0.1,
+      "sd": 0.05,
+      "doi": "10.1136/bmj.38142.554479.AE",
+      "title": "Mortality in relation to smoking: 50 years' observations on male British doctors",
+      "first_author": "Doll",
+      "year": 2004,
+      "verified": "2026-09-09",
+      "per": "per_cigarette_day"
+    },
+    "study": "smoking-doll-peto",
+    "grade": "strong",
+    "companions": [
+      "smk_current",
+      "smk_former"
+    ],
+    "companion_reason": "Smoking is one categorical exposure: never (reference) / former / current, plus a dose term for current smokers. Former-vs-never only means what Doll 2004 measured when the other indicators are in the model \u2014 otherwise the reference group silently becomes 'everyone else'.",
+    "intervention_evidence": {
+      "claim": "Cutting down is worth much less than the per-cigarette gradient implies, so a What-If that prices a dose reduction must say so.",
+      "why_here": "The fitted cigs_day coefficient is a linear per-cigarette slope estimated ACROSS smokers. Applied to a reduction it assumes someone who cuts down ends up like someone who always smoked that little, which the cohort evidence does not support. The service returns a note saying this; the sources for that note belong with the coefficient they qualify, not in the service's source code.",
+      "sources": [
+        {
+          "doi": "10.1093/aje/kwf150",
+          "title": "Smoking Reduction, Smoking Cessation, and Mortality: A 16-year Follow-up of 19,732 Men and Women from the Copenhagen Centre for Prospective Population Studies",
+          "first_author": "Godtfredsen",
+          "year": 2002,
+          "verified": "2026-09-10",
+          "supports": "reduction_without_cessation_shows_little_to_no_all_cause_mortality_benefit",
+          "design": "prospective cohort, 19,732 people, 16-year follow-up"
+        },
+        {
+          "doi": "10.1136/tc.2005.011932",
+          "title": "Health consequences of smoking 1-4 cigarettes per day",
+          "first_author": "Bjartveit",
+          "year": 2005,
+          "verified": "2026-09-10",
+          "supports": "dose_response_is_concave_the_first_few_cigarettes_carry_more_than_their_share",
+          "design": "prospective cohort, 42,722 people, ~27-year follow-up"
+        }
+      ],
+      "why_cohort": "Cohort rather than trial, for two different reasons. Reduction trials are powered for cessation, not mortality, so they cannot settle what cutting down does to how long you live. And nobody can randomise people to smoke, which is why the low-dose evidence is observational too."
+    }
+  },
+  "activity": {
+    "role": "lever",
+    "source": "fitted",
+    "sign": "negative",
+    "shape": "monotone_decreasing",
+    "questions": [
+      "Q8_activity_days",
+      "Q9_activity_minutes"
+    ],
+    "causes": [
+      "waist",
+      "diabetes",
+      "sbp",
+      "mobility"
+    ],
+    "confounded_by": [
+      "age",
+      "sex",
+      "education",
+      "income",
+      "smk_current",
+      "mobility"
+    ],
+    "prior": {
+      "log_hr": -0.26,
+      "sd": 0.06,
+      "doi": "10.1001/jamainternmed.2015.0533",
+      "title": "Leisure Time Physical Activity and Mortality",
+      "first_author": "Arem",
+      "year": 2015,
+      "verified": "2026-09-09",
+      "per": "per_category"
+    },
+    "study": "activity-arem",
+    "grade": "strong",
+    "assumption": "activity -> waist taken as the dominant direction of a real feedback loop (energy balance); the reverse (adiposity limits activity) is secondary at population level."
+  },
+  "sedentary": {
+    "role": "lever",
+    "source": "literature",
+    "sign": "positive",
+    "shape": "monotone_increasing",
+    "questions": [
+      "Q10_sedentary"
+    ],
+    "causes": [
+      "waist",
+      "diabetes"
+    ],
+    "confounded_by": [
+      "age",
+      "sex",
+      "education",
+      "income",
+      "activity"
+    ],
+    "prior": {
+      "log_hr": 0.08,
+      "sd": 0.04,
+      "doi": "10.1371/journal.pone.0080000",
+      "title": "Daily Sitting Time and All-Cause Mortality: A Meta-Analysis",
+      "first_author": "Chau",
+      "year": 2013,
+      "verified": "2026-09-09",
+      "per": "per_hour"
+    },
+    "standardizer": {
+      "mean": 6.0,
+      "sd": 2.5,
+      "source": "assumed from the Chau 2013 dose-response range"
+    },
+    "study": "sitting-time",
+    "grade": "moderate"
+  },
+  "sleep_long": {
+    "role": "marker",
+    "source": "fitted",
+    "sign": "positive",
+    "shape": "linear",
+    "questions": [
+      "Q11_sleep"
+    ],
+    "causes": [],
+    "confounded_by": [
+      "age",
+      "sex",
+      "diabetes",
+      "cvd_hx",
+      "cancer_hx",
+      "respiratory",
+      "mobility"
+    ],
+    "prior": {
+      "log_hr": 0.3,
+      "sd": 0.08,
+      "doi": "10.1093/sleep/33.5.585",
+      "title": "Sleep Duration and All-Cause Mortality: A Systematic Review and Meta-Analysis",
+      "first_author": "Cappuccio",
+      "year": 2010,
+      "verified": "2026-09-09"
+    },
+    "study": "sleep-cappuccio",
+    "grade": "moderate",
+    "decision": "DEMOTED from lever to marker (ONT-01, 2026-09-09). The association is real and it predicts, but the dominant causal direction is illness -> long sleep, not long sleep -> death. Recommending less sleep would be advice with no evidence of benefit and a real risk of harm. Predicts and explains; never recommended, never a What-If target."
+  },
+  "waist": {
+    "role": "lever",
+    "source": "fitted",
+    "sign": "positive",
+    "shape": "monotone_increasing",
+    "questions": [
+      "Q12_waist"
+    ],
+    "causes": [
+      "diabetes",
+      "sbp",
+      "high_bp",
+      "cvd_hx",
+      "mobility"
+    ],
+    "confounded_by": [
+      "age",
+      "sex",
+      "education",
+      "income",
+      "smk_current",
+      "smk_former",
+      "activity",
+      "sedentary",
+      "diet",
+      "alcohol"
+    ],
+    "prior": {
+      "log_hr": 0.24,
+      "sd": 0.08,
+      "doi": "10.1136/bmj.m3324",
+      "title": "Central fatness and risk of all cause mortality: systematic review and dose-response meta-analysis",
+      "first_author": "Jayedi",
+      "year": 2020,
+      "verified": "2026-09-09",
+      "per": "per_10cm"
+    },
+    "study": "waist-mortality",
+    "grade": "strong",
+    "assumption": "waist -> mobility taken as the dominant direction of a feedback loop.",
+    "note": "smoking -> waist is NEGATIVE (nicotine suppresses appetite), which is why smoking is a CONFOUNDER of the waist-mortality effect and must be adjusted for.",
+    "waived_confounders": [
+      "diet",
+      "alcohol",
+      "sedentary"
+    ],
+    "waiver_reason": "Diet, alcohol and sitting time are literature features: NHANES carries no usable item-level batteries for them, so they cannot enter a cohort-fitted adjustment set. The waist total effect is therefore adjusted for age, sex, smoking, activity and SES but NOT for these three. Recorded so the estimate is read as partially adjusted rather than fully causal.",
+    "clip_expected": true,
+    "clip_reason": "In the PREDICTION model \u2014 which conditions on diabetes, blood pressure and mobility, the very paths adiposity acts through \u2014 the direct effect of waist is negative and PRECISELY estimated: -0.1345 +/- 0.0292, z = -4.6. This is a decision taken over a real signal, not over noise: we do not believe adiposity protects anyone, so the constraint holds it at 0 and waist does not move the headline estimate, while its TOTAL effect (+0.011 from the cohort) is what What-If and the recommendations use. Owner decision, ONT-01 Q3. Note this also changes what waist_x_young means: with the main effect pinned, the interaction carries the young's whole waist effect rather than a difference from it."
+  },
+  "diet": {
+    "role": "lever",
+    "source": "literature",
+    "sign": "negative",
+    "shape": "monotone_decreasing",
+    "questions": [
+      "Q13_veg",
+      "Q14_fruit_nuts",
+      "Q15_whole_grains",
+      "Q16_fish",
+      "Q17_red_meat"
+    ],
+    "causes": [
+      "waist",
+      "sbp",
+      "diabetes"
+    ],
+    "confounded_by": [
+      "age",
+      "sex",
+      "education",
+      "income"
+    ],
+    "prior": {
+      "log_hr": -0.15,
+      "sd": 0.05,
+      "doi": "10.1056/NEJMoa025039",
+      "title": "Adherence to a Mediterranean Diet and Survival in a Greek Population",
+      "first_author": "Trichopoulou",
+      "year": 2003,
+      "verified": "2026-09-09",
+      "per": "per_sd_of_published_score"
+    },
+    "standardizer": {
+      "mean": 2.5,
+      "sd": 1.12,
+      "source": "assumed binomial(5, 0.5) on the 0-5 item sum"
+    },
+    "study": "mediterranean-diet",
+    "grade": "strong"
+  },
+  "alcohol": {
+    "role": "lever",
+    "source": "literature",
+    "sign": "positive",
+    "shape": "monotone_increasing",
+    "questions": [
+      "Q18_alcohol"
+    ],
+    "causes": [
+      "sbp",
+      "cancer_hx",
+      "waist"
+    ],
+    "confounded_by": [
+      "age",
+      "sex",
+      "education",
+      "income",
+      "smk_current"
+    ],
+    "levels": {
+      "none": 0.0,
+      "light": 0.03,
+      "moderate": 0.12,
+      "heavy": 0.3
+    },
+    "reference_level": "light",
+    "prior": {
+      "doi": "10.1016/S0140-6736(18)31310-2",
+      "title": "Alcohol use and burden for 195 countries and territories, 1990-2016",
+      "first_author": "Griswold",
+      "year": 2018,
+      "verified": "2026-09-09"
+    },
+    "study": "alcohol-gbd",
+    "grade": "strong_for_harm",
+    "note": "Monotone non-decreasing by construction: no safe level, no protective dip (the J-curve is a selection artifact)."
+  },
+  "stress": {
+    "role": "lever",
+    "source": "literature",
+    "sign": "positive",
+    "shape": "monotone_increasing",
+    "questions": [
+      "Q19_stress"
+    ],
+    "causes": [
+      "sbp",
+      "smk_current"
+    ],
+    "confounded_by": [
+      "age",
+      "sex",
+      "education",
+      "income"
+    ],
+    "prior": {
+      "log_hr": 0.05,
+      "sd": 0.04,
+      "doi": "10.2307/2136404",
+      "title": "A Global Measure of Perceived Stress",
+      "first_author": "Cohen",
+      "year": 1983,
+      "verified": "2026-09-09",
+      "per": "per_sd_of_published_score"
+    },
+    "standardizer": {
+      "mean": 6.11,
+      "sd": 3.14,
+      "source": "Warttig 2013 PSS-4 population norms"
+    },
+    "study": "pss-stress",
+    "grade": "weak",
+    "note": "The DOI is the instrument (PSS); the mortality effect size is weak and deliberately conservative."
+  },
+  "sbp": {
+    "role": "manage",
+    "source": "fitted",
+    "sign": "positive",
+    "shape": "monotone_increasing",
+    "questions": [
+      "Q21_conditions"
+    ],
+    "causes": [
+      "cvd_hx"
+    ],
+    "confounded_by": [
+      "age",
+      "sex",
+      "waist",
+      "diet",
+      "alcohol",
+      "stress",
+      "activity"
+    ],
+    "study": "blood-pressure-psc",
+    "grade": "strong",
+    "prior": {
+      "doi": "10.1016/S0140-6736(02)11911-8",
+      "title": "Age-specific relevance of usual blood pressure to vascular mortality",
+      "first_author": "Prospective Studies Collaboration",
+      "year": 2002,
+      "verified": "2026-09-09"
+    }
+  },
+  "diabetes": {
+    "role": "manage",
+    "source": "fitted",
+    "sign": "positive",
+    "shape": "linear",
+    "questions": [
+      "Q21_conditions"
+    ],
+    "causes": [
+      "cvd_hx",
+      "mobility"
+    ],
+    "confounded_by": [
+      "age",
+      "sex",
+      "education",
+      "income",
+      "waist",
+      "activity",
+      "diet",
+      "sedentary"
+    ],
+    "prior": {
+      "log_hr": 0.55,
+      "sd": 0.1,
+      "doi": "10.1056/NEJMoa1008862",
+      "title": "Diabetes Mellitus, Fasting Glucose, and Risk of Cause-Specific Death",
+      "first_author": "Emerging Risk Factors Collaboration",
+      "year": 2011,
+      "verified": "2026-09-09",
+      "per": "binary"
+    },
+    "study": "diabetes-mortality",
+    "grade": "strong"
+  },
+  "high_bp": {
+    "role": "manage",
+    "source": "fitted",
+    "sign": "positive",
+    "shape": "linear",
+    "questions": [
+      "Q21_conditions"
+    ],
+    "causes": [
+      "cvd_hx"
+    ],
+    "confounded_by": [
+      "age",
+      "sex",
+      "waist",
+      "diet",
+      "alcohol"
+    ],
+    "study": "blood-pressure-psc",
+    "grade": "strong",
+    "prior": {
+      "doi": "10.1016/S0140-6736(02)11911-8",
+      "title": "Age-specific relevance of usual blood pressure to vascular mortality",
+      "first_author": "Prospective Studies Collaboration",
+      "year": 2002,
+      "verified": "2026-09-09"
+    }
+  },
+  "respiratory": {
+    "role": "manage",
+    "source": "fitted",
+    "sign": "positive",
+    "shape": "linear",
+    "questions": [
+      "Q21_conditions"
+    ],
+    "causes": [
+      "mobility"
+    ],
+    "confounded_by": [
+      "age",
+      "sex",
+      "smk_current",
+      "smk_former",
+      "env"
+    ],
+    "study": "copd-halbert",
+    "grade": "strong",
+    "prior": {
+      "doi": "10.1183/09031936.06.00124605",
+      "title": "Global burden of COPD: systematic review and meta-analysis",
+      "first_author": "Halbert",
+      "year": 2006,
+      "verified": "2026-09-09"
+    }
+  },
+  "mobility": {
+    "role": "marker",
+    "source": "fitted",
+    "sign": "positive",
+    "shape": "monotone_increasing",
+    "questions": [
+      "Q22_history"
+    ],
+    "causes": [],
+    "confounded_by": [
+      "age",
+      "sex",
+      "waist",
+      "diabetes",
+      "cvd_hx",
+      "respiratory",
+      "cancer_hx"
+    ],
+    "study": "mobility-studenski",
+    "grade": "strong",
+    "note": "Downstream marker of accumulated damage, not a cause. Predicts and explains; never recommended. Coefficient fitted on the BINARY any-difficulty encoding (harmonize.py pfq_diff = PFQ061B > 1).",
+    "prior": {
+      "doi": "10.1001/jama.2010.1923",
+      "title": "Gait Speed and Survival in Older Adults",
+      "first_author": "Studenski",
+      "year": 2011,
+      "verified": "2026-09-09"
+    },
+    "decision": "Classified as MARKER, not context: difficulty walking is downstream evidence of accumulated damage rather than a cause of death, so it predicts and explains but is never recommended or offered in What-If."
+  },
+  "cvd_hx": {
+    "role": "context",
+    "source": "fitted",
+    "sign": "positive",
+    "shape": "linear",
+    "questions": [
+      "Q22_history"
+    ],
+    "causes": [
+      "mobility"
+    ],
+    "confounded_by": [
+      "age",
+      "sex",
+      "smk_current",
+      "sbp",
+      "diabetes",
+      "waist"
+    ],
+    "study": "cvd-multimorbidity",
+    "grade": "strong",
+    "prior": {
+      "doi": "10.1001/jama.2015.7008",
+      "title": "Association of Cardiometabolic Multimorbidity With Mortality",
+      "first_author": "Di Angelantonio",
+      "year": 2015,
+      "verified": "2026-09-09"
+    }
+  },
+  "cancer_hx": {
+    "role": "context",
+    "source": "fitted",
+    "sign": "positive",
+    "shape": "linear",
+    "questions": [
+      "Q22_history"
+    ],
+    "causes": [
+      "mobility"
+    ],
+    "confounded_by": [
+      "age",
+      "sex",
+      "smk_current",
+      "alcohol"
+    ],
+    "study": "cancer-survivorship",
+    "grade": "strong",
+    "prior": {
+      "doi": "10.3322/caac.21565",
+      "title": "Cancer treatment and survivorship statistics, 2019",
+      "first_author": "Miller",
+      "year": 2019,
+      "verified": "2026-09-09"
+    }
+  },
+  "env": {
+    "role": "context",
+    "source": "literature",
+    "sign": "positive",
+    "shape": "linear",
+    "questions": [
+      "Q23_location",
+      "Q24_area_type"
+    ],
+    "causes": [
+      "respiratory",
+      "cvd_hx"
+    ],
+    "confounded_by": [
+      "income",
+      "education"
+    ],
+    "prior": {
+      "doi": "10.1289/ehp.1307049",
+      "title": "An Integrated Risk Function for Estimating the Global Burden of Disease Attributable to Ambient Fine Particulate Matter Exposure",
+      "first_author": "Burnett",
+      "year": 2014,
+      "verified": "2026-09-09"
+    },
+    "prior_secondary": {
+      "doi": "10.1016/S2542-5196(19)30215-3",
+      "title": "Green spaces and mortality: a systematic review and meta-analysis",
+      "first_author": "Rojas-Rueda",
+      "year": 2019,
+      "verified": "2026-09-09"
+    },
+    "study": "greenspace",
+    "grade": "moderate",
+    "note": "CONTEXT for the personal clock (you do not 'recommend' moving); LEVER only inside Where Should I Live. Computed by the service from PM2.5/NDVI, not a fitted coefficient."
+  }
+}

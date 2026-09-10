@@ -41,7 +41,7 @@ async fn state() -> Arc<AppState> {
             if std::env::var("JWT_SECRET").is_err() {
                 std::env::set_var("JWT_SECRET", "integration-test-secret");
             }
-            let s = init_state("bundle/model-v3.0.1", &test_db_url())
+            let s = init_state("bundle/model-v4.0.0", &test_db_url())
                 .await
                 .expect("init_state (is PostgreSQL running and clock_of_life_test present?)");
             sqlx::query("TRUNCATE scenario, calculation, answer RESTART IDENTITY CASCADE")
@@ -265,7 +265,7 @@ fn estimate_why_and_context_not_recommended() {
     let est = body_json(resp).await;
 
     // model provenance block.
-    assert_eq!(est["model"]["version"], "3.0.1");
+    assert_eq!(est["model"]["version"], "4.0.0");
     assert!(est["model"]["algorithm"].as_str().is_some());
     // why[] present, populated, each entry well-formed and sensibly signed.
     let why = est["why"].as_array().expect("why[] present");
@@ -1315,7 +1315,7 @@ fn incompatible_bundle_refused_at_load() {
     // existed only to be refused, so ONT-04 deleted them and the test builds what it needs. Each
     // variant strips exactly one thing the scoring design requires.
     let good: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string("bundle/model-v3.0.1/coefficients.json").unwrap(),
+        &std::fs::read_to_string("bundle/model-v4.0.0/coefficients.json").unwrap(),
     )
     .unwrap();
 
@@ -1361,10 +1361,10 @@ fn incompatible_bundle_refused_at_load() {
 /// cannot explain must be refused.
 #[test]
 fn unsurfaced_lever_refused_at_load() {
-    let coefs = std::fs::read_to_string("bundle/model-v3.0.1/coefficients.json").unwrap();
+    let coefs = std::fs::read_to_string("bundle/model-v4.0.0/coefficients.json").unwrap();
     let good_coefs: serde_json::Value = serde_json::from_str(&coefs).unwrap();
     let good_ont: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string("bundle/model-v3.0.1/ontology.json").unwrap(),
+        &std::fs::read_to_string("bundle/model-v4.0.0/ontology.json").unwrap(),
     )
     .unwrap();
 
@@ -1413,7 +1413,7 @@ fn unsurfaced_lever_refused_at_load() {
 #[test]
 fn literature_gate_refuses_each_malformed_variant() {
     let good: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string("bundle/model-v3.0.1/coefficients.json").unwrap(),
+        &std::fs::read_to_string("bundle/model-v4.0.0/coefficients.json").unwrap(),
     )
     .unwrap();
 
@@ -1505,7 +1505,7 @@ fn literature_levers_surface_everywhere() {
 #[test]
 fn seed_roles_match_the_shipped_ontology() {
     let ont: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string("bundle/model-v3.0.1/ontology.json").unwrap(),
+        &std::fs::read_to_string("bundle/model-v4.0.0/ontology.json").unwrap(),
     )
     .unwrap();
     let feats: Vec<serde_json::Value> = serde_json::from_str(
@@ -1565,7 +1565,7 @@ fn reconciliation_spares_admin_authored_rules() {
     .unwrap();
 
     // Reconcile again, exactly as a restart would.
-    seed::reconcile(&s.pool, &s.bundle.manifest, "bundle/model-v3.0.1").await.unwrap();
+    seed::reconcile(&s.pool, &s.bundle.manifest, "bundle/model-v4.0.0").await.unwrap();
 
     let still_active: bool = sqlx::query_scalar("SELECT active FROM recommendation_rule WHERE code = $1")
         .bind(&code)
@@ -1587,7 +1587,7 @@ fn reconciliation_spares_admin_authored_rules() {
     .execute(&s.pool)
     .await
     .unwrap();
-    seed::reconcile(&s.pool, &s.bundle.manifest, "bundle/model-v3.0.1").await.unwrap();
+    seed::reconcile(&s.pool, &s.bundle.manifest, "bundle/model-v4.0.0").await.unwrap();
     let active: bool = sqlx::query_scalar("SELECT active FROM recommendation_rule WHERE code = $1")
         .bind(&gone).fetch_one(&s.pool).await.unwrap();
     assert!(!active, "a seed-owned rule missing from the seed must be withdrawn");
@@ -1656,4 +1656,90 @@ fn a_smoker_who_skips_the_dose_is_scored_as_an_average_smoker() {
     // not answering. Distinguishing them would need cigs_day to become Option<f64>; the model has
     // no coefficient for "smokes but smokes nothing" either way.
     });
+}
+
+/// W-A4: the bundle now carries two country lists, and the difference between them is the difference
+/// between "we can draw your country" and "we can give you a number". These pin that boundary.
+#[test]
+fn scoreable_and_drawable_are_not_the_same_set() {
+    RT.block_on(async {
+        let s = state().await;
+
+        // /api/meta is the promise, and it must still be the scoreable 30 — not the 237 the bundle
+        // can now draw. Widening it would score a Nigerian against a US cohort-mean reference person.
+        let meta = body_json(call(&s, get("/api/meta")).await).await;
+        let countries = meta["countries"].as_array().expect("countries");
+        assert_eq!(countries.len(), 30, "meta must promise only what can be centred");
+        assert!(s.bundle.reference.len() >= 230, "the atlas needs the whole world to draw");
+        assert!(countries.iter().all(|c| s.bundle.reference.contains_key(c.as_str().unwrap())),
+                "every scoreable country must also be drawable");
+
+        // A country with a life table and no centring must be refused a personal number, not given
+        // one built from somebody else's population.
+        let nigeria = json!({"country": "NG", "age": 45, "sex": "M", "smoke": 0, "pa_min": 300,
+                             "sleep": 7, "waist": 90});
+        let resp = call(&s, post("/api/estimate", nigeria)).await;
+        assert_eq!(resp.status(), 400, "a reference-only country must not be scored");
+    });
+}
+
+/// Eurostat calls Greece EL; this bundle calls it GR. Stored `calculation.inputs` rows and deployed
+/// clients still say EL, and until now NO test in either repo sent it — so the rename would have
+/// surfaced as existing Greek users getting "no baseline for country EL" on their next estimate.
+#[test]
+fn the_country_greece_used_to_be_called_still_works() {
+    RT.block_on(async {
+        let s = state().await;
+        let mk = |c: &str| json!({"country": c, "age": 50, "sex": "F", "smoke": 1, "pa_min": 200,
+                                  "sleep": 7, "waist": 85});
+        let old = body_json(call(&s, post("/api/estimate", mk("EL"))).await).await;
+        let new = body_json(call(&s, post("/api/estimate", mk("GR"))).await).await;
+        assert_eq!(old["estimate_years"], new["estimate_years"],
+                   "EL and GR are the same country and must give the same number");
+        assert!(old["estimate_years"].as_f64().unwrap() > 0.0);
+    });
+}
+
+/// The defect the source switch fixes: every Eurostat table ended at 95 with qx = 1.0, so
+/// `remaining_le` returned exactly 0.50 years for every 95-year-old in every country — arithmetic,
+/// not a claim about old age, while `Profile::validate` accepts ages up to 110.
+#[test]
+fn a_95_year_old_is_not_priced_at_half_a_year() {
+    RT.block_on(async {
+        let s = state().await;
+        let ro = s.bundle.baselines.get("RO").expect("RO");
+        let qx = ro.qx.get("M").expect("male table");
+        assert_eq!(qx.keys().filter_map(|a| a.parse::<i64>().ok()).max(), Some(100),
+                   "the table must run to 100, not stop at 95");
+        let left = clock_of_life_service::scoring::remaining_le(qx, 95, 1.0);
+        assert!(left > 1.5, "a 95-year-old Romanian man had {left} years left");
+    });
+}
+
+/// A reference baseline with an empty table would panic inside a request handler (`remaining_le`
+/// indexes pts[0]), which is the wrong place to discover a bad bundle.
+#[test]
+fn a_reference_country_with_no_life_table_is_refused_at_load() {
+    let dir = std::env::temp_dir().join(format!("clock-empty-ref-{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("baselines")).unwrap();
+    for name in ["coefficients.json", "ontology.json", "evidence.json"] {
+        std::fs::copy(format!("bundle/model-v4.0.0/{name}"), dir.join(name)).ok();
+    }
+    std::fs::write(
+        dir.join("baselines").join("XX.json"),
+        json!({"country": "XX", "qx": {"M": {}}}).to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("manifest.json"),
+        json!({"version": "0.0.0-test", "algorithm": "cox_ph", "countries": [],
+               "reference_countries": ["XX"], "checksums": {}})
+        .to_string(),
+    )
+    .unwrap();
+    let err = clock_of_life_service::bundle::Bundle::load(&dir)
+        .err()
+        .expect("a reference country with an empty life table must be refused");
+    std::fs::remove_dir_all(&dir).ok();
+    assert!(err.contains("is empty"), "got: {err}");
 }
