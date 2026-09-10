@@ -1,3 +1,5 @@
 /target
 __pycache__/
 *.pyc
+# stray object files from the zig-cc probe: `cc -c -` writes `-.o` into the cwd
+*.o

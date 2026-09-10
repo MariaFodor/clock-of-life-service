@@ -14,7 +14,8 @@ import time
 import urllib.error
 import urllib.request
 
-BASE = "http://127.0.0.1:8080"
+import os
+BASE = os.environ.get("CLOCK_BASE", "http://127.0.0.1:8080")   # matches the service's CLOCK_ADDR
 checks = []
 
 
@@ -97,13 +98,15 @@ def main():
         # If this ever reads 237, every non-European user is being scored against a US cohort mean.
         check("meta still promises only the 30 countries that can be scored",
               len(meta.get("countries", [])) == 30, str(len(meta.get("countries", []))))
-        check("Greece still answers to the code Eurostat used (EL -> GR)",
-              post("/api/estimate", {"country": "EL", "age": 50, "sex": "F", "smoke": 1,
-                                     "pa_min": 200, "sleep": 7, "waist": 85}).status_code == 200)
+        el_status, _ = post("/api/estimate", {"country": "EL", "age": 50, "sex": "F", "smoke": 1,
+                                             "pa_min": 200, "sleep": 7, "waist": 85})
+        check("Greece still answers to the code Eurostat used (EL -> GR)", el_status == 200,
+              str(el_status))
         # A country the map can draw but the clock cannot centre must be refused a personal number.
-        check("a reference-only country is refused a personal estimate",
-              post("/api/estimate", {"country": "NG", "age": 45, "sex": "M", "smoke": 0,
-                                     "pa_min": 300, "sleep": 7, "waist": 90}).status_code == 400)
+        ng_status, _ = post("/api/estimate", {"country": "NG", "age": 45, "sex": "M", "smoke": 0,
+                                             "pa_min": 300, "sleep": 7, "waist": 90})
+        check("a reference-only country is refused a personal estimate", ng_status == 400,
+              str(ng_status))
 
         ro = {"country": "RO", "age": 40, "sex": "M", "smoke": 0, "pa_min": 2000, "sleep": 7,
               "waist": 85, "higher_educ": True, "income": 4.0}

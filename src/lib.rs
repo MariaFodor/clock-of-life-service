@@ -282,6 +282,10 @@ async fn meta(State(s): State<Arc<AppState>>) -> Json<serde_json::Value> {
         "model_version": s.bundle.manifest.version,
         "algorithm": s.bundle.manifest.algorithm,
         "countries": countries,
+        // Codes that used to be valid and now resolve elsewhere. Without this a client holding a
+        // stored `EL` finds no matching option in a picker built from `countries`, even though the
+        // server still scores it — the estimate keeps working and the client cannot heal its value.
+        "country_aliases": s.bundle.manifest.country_aliases,
         "assumptions": [
             "statistical estimate, not a prediction or diagnosis",
             "relative risk centred on the selected country's average person",

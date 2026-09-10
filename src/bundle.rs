@@ -318,9 +318,36 @@ impl Bundle {
         let evidence: HashMap<String, Evidence> =
             read_json(&dir.join("evidence.json")).unwrap_or_default();
 
+        // Country codes come from a hand-copied manifest and are joined onto a directory path, so
+        // they are shape-checked before being used as a filename.
+        fn iso_ok(iso: &str) -> bool {
+            iso.len() == 2 && iso.bytes().all(|b| b.is_ascii_uppercase())
+        }
+        // `remaining_le` indexes pts[0]; an empty table panics inside a request handler, which is the
+        // wrong place to discover a bad bundle. Applied to EVERY table loaded, not just the reference
+        // ones — a manifest with no `reference_countries` would otherwise skip the check entirely and
+        // leave the panic reachable through a scoreable country.
+        fn qx_ok(iso: &str, qx: &HashMap<String, HashMap<String, f64>>) -> Result<(), String> {
+            if qx.is_empty() {
+                return Err(format!("baselines/{iso}.json: qx carries no sexes at all"));
+            }
+            for (sex, table) in qx {
+                if table.is_empty() {
+                    return Err(format!(
+                        "baselines/{iso}.json: qx for sex '{sex}' is empty — refusing this bundle"
+                    ));
+                }
+            }
+            Ok(())
+        }
+
         let mut baselines = HashMap::new();
         for iso in &manifest.countries {
+            if !iso_ok(iso) {
+                return Err(format!("manifest: {iso:?} is not an ISO 3166-1 alpha-2 code"));
+            }
             let b: Baseline = read_json(&dir.join("baselines").join(format!("{iso}.json")))?;
+            qx_ok(iso, &b.qx)?;
             baselines.insert(iso.clone(), b);
         }
 
@@ -328,16 +355,11 @@ impl Bundle {
         // scored against, so widening this list can never widen /api/meta.
         let mut reference = HashMap::new();
         for iso in &manifest.reference_countries {
-            let b: ReferenceBaseline = read_json(&dir.join("baselines").join(format!("{iso}.json")))?;
-            // `remaining_le` indexes pts[0] — an empty table panics inside a request handler rather
-            // than failing here, which is the wrong place for a bad bundle to be discovered.
-            for (sex, table) in &b.qx {
-                if table.is_empty() {
-                    return Err(format!(
-                        "baselines/{iso}.json: qx for sex '{sex}' is empty — refusing this bundle"
-                    ));
-                }
+            if !iso_ok(iso) {
+                return Err(format!("manifest: {iso:?} is not an ISO 3166-1 alpha-2 code"));
             }
+            let b: ReferenceBaseline = read_json(&dir.join("baselines").join(format!("{iso}.json")))?;
+            qx_ok(iso, &b.qx)?;
             reference.insert(iso.clone(), b);
         }
         // Scoreable must be a subset of drawable, or /api/meta offers a country the atlas cannot show.
@@ -354,8 +376,13 @@ impl Bundle {
         }
         // An alias pointing nowhere is a country that used to work and now 400s.
         for (from, to) in &manifest.country_aliases {
-            if !baselines.contains_key(to) && !reference.contains_key(to) {
-                return Err(format!("manifest: alias {from} -> {to} resolves to no baseline"));
+            // Against the SCOREABLE map, because that is the only one `risk()` resolves through. An
+            // alias pointing at a reference-only country would pass a check against both maps and
+            // then 400 on every request — exactly the failure this refusal exists to prevent.
+            if !baselines.contains_key(to) {
+                return Err(format!(
+                    "manifest: alias {from} -> {to} resolves to no SCOREABLE baseline"
+                ));
             }
             if baselines.contains_key(from) || reference.contains_key(from) {
                 return Err(format!("manifest: alias {from} shadows a real baseline"));
