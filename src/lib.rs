@@ -616,6 +616,25 @@ async fn meta(State(s): State<Arc<AppState>>) -> Json<serde_json::Value> {
         "model_version": s.bundle.manifest.version,
         "algorithm": s.bundle.manifest.algorithm,
         "countries": countries,
+        // The same list with names and ISO3 codes, so the interview's country question can be built
+        // from what the model actually ships rather than from a hand-kept list in the front end. A
+        // second copy of 30 country names is a second thing to update when the 31st is added — and
+        // until this shipped there was no country question at all, because the profile hardcoded RO.
+        //
+        // `iso3` travels with it because the settlement picker keys on ISO3 (`/api/places/{iso3}`)
+        // while a profile stores ISO2, and the client should not have to hold a mapping between them.
+        "country_options": countries.iter().map(|iso2| {
+            let r = s.bundle.reference.get(*iso2);
+            json!({
+                "iso2": iso2,
+                "iso3": r.and_then(|r| r.iso3.clone()),
+                "name": r.and_then(|r| r.name.clone()),
+                // How many measured settlements this country has, so the picker can say up front
+                // whether a city question will have anything in it.
+                "settlements": r.and_then(|r| r.iso3.as_deref())
+                    .map_or(0, |iso3| s.bundle.places.iter().filter(|p| p.iso3 == iso3).count()),
+            })
+        }).collect::<Vec<_>>(),
         // Codes that used to be valid and now resolve elsewhere. Without this a client holding a
         // stored `EL` finds no matching option in a picker built from `countries`, even though the
         // server still scores it — the estimate keeps working and the client cannot heal its value.

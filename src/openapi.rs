@@ -52,7 +52,7 @@ pub fn openapi_doc() -> Value {
             "/api/auth/register": { "post": op("Create an account, return a bearer token", false, "auth") },
             "/api/auth/login": { "post": op("Verify credentials, return a bearer token", false, "auth") },
 
-            "/api/questions": { "get": op("Interview definition (24 questions)", false, "interview") },
+            "/api/questions": { "get": op("Interview definition (25 questions, Q0_country first — it selects the life table, not a lever)", false, "interview") },
             "/api/ontology": { "get": op("Model ontology: roles, causal graph, verified article links", false, "evidence") },
             "/api/references": { "get": op("Evidence studies; ?feature= or ?rule= filters", false, "evidence") },
             "/api/locations": { "get": op("Locations with PM2.5 / greenspace", false, "environment") },

@@ -38,7 +38,7 @@ cargo test
 - `GET /health` — readiness (DB ping + bundle); 503 when the DB is unreachable
 - `GET /api/openapi.json` — OpenAPI 3.0 contract (source for the web client) *(public)*
 - `GET /api/meta` — active model version + provenance
-- `GET /api/questions` — the 24-question interview definition *(public)*
+- `GET /api/questions` — the 25-question interview definition (Q0_country first) *(public)*
 - `GET /api/ontology` — the model's ontology: each factor's role, the causal graph, and a verified article link. Public.
 - `GET /api/references` — evidence studies (openable DOIs / reviews); `?feature=<key>` or `?rule=<code>` *(public)*
 - `GET /api/locations` — every seeded settlement with its PM2.5 / greenspace *(public)*
