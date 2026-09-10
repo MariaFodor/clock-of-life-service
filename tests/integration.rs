@@ -41,7 +41,7 @@ async fn state() -> Arc<AppState> {
             if std::env::var("JWT_SECRET").is_err() {
                 std::env::set_var("JWT_SECRET", "integration-test-secret");
             }
-            let s = init_state("bundle/model-v4.0.0", &test_db_url())
+            let s = init_state("bundle/model-v4.1.1", &test_db_url())
                 .await
                 .expect("init_state (is PostgreSQL running and clock_of_life_test present?)");
             sqlx::query("TRUNCATE scenario, calculation, answer RESTART IDENTITY CASCADE")
@@ -265,7 +265,7 @@ fn estimate_why_and_context_not_recommended() {
     let est = body_json(resp).await;
 
     // model provenance block.
-    assert_eq!(est["model"]["version"], "4.0.0");
+    assert_eq!(est["model"]["version"], "4.1.1");
     assert!(est["model"]["algorithm"].as_str().is_some());
     // why[] present, populated, each entry well-formed and sensibly signed.
     let why = est["why"].as_array().expect("why[] present");
@@ -669,7 +669,9 @@ fn env_is_lever_only_in_relocate() {
     assert!(est["why"].as_array().unwrap().iter().all(|w| w["key"] != "env"), "env is not a why[] factor");
 
     // But relocation DOES act on it.
-    let rel = body_json(call(&s, post("/api/relocate", json!({"base": dirty, "to": "Rural (national)"}))).await).await;
+    // Constanta, 9.78 µg/m³ in 2023 — the cleanest measured Romanian settlement, replacing the invented
+    // "Rural (national)" row at 10.0.
+    let rel = body_json(call(&s, post("/api/relocate", json!({"base": dirty, "to": "Constanta"}))).await).await;
     assert!(rel["delta_years"].as_f64().unwrap() > 0.0, "moving to cleaner air adds years (env as lever)");
     });
 }
@@ -960,6 +962,7 @@ fn openapi_lists_all_routes() {
         "/api/questions",
         "/api/ontology", "/api/references", "/api/locations", "/api/aggregates", "/api/atlas",
         "/api/estimate", "/api/recommendations", "/api/whatif", "/api/relocate",
+        "/api/places/{iso3}",
         "/api/calculations", "/api/answers", "/api/profile", "/api/profile/location",
         "/api/account/export", "/api/account",
         "/api/admin/audit", "/api/admin/questions", "/api/admin/questions/{code}",
@@ -988,6 +991,7 @@ fn spa_served_with_fallback() {
         jwt_secret: s.jwt_secret.clone(), token_ttl_secs: s.token_ttl_secs,
         web_dist: dir.to_string_lossy().to_string(),
         atlas: s.atlas.clone(), atlas_etag: s.atlas_etag.clone(),
+        places: s.places.clone(),
     });
 
     // A deep link (no such file) falls back to index.html.
@@ -1119,21 +1123,41 @@ fn relocate_compares_locations() {
     let s = state().await;
     let base = json!({"country": "RO", "age": 45, "sex": "M", "smoke": 0, "pa_min": 600, "sleep": 7, "waist": 90});
 
-    let resp = call(&s, post("/api/relocate", json!({"base": base, "from": "Bucharest", "to": "Brașov"}))).await;
+    // Real settlements, real WHO spellings. Bucuresti measured 16.27 µg/m³ in 2024, Brasov 13.99.
+    // Until v4.1.1 this test moved between "Bucharest" at 19.0 and "Brașov" at 13.0, both invented.
+    let resp = call(&s, post("/api/relocate", json!({"base": base, "from": "Bucuresti", "to": "Brasov"}))).await;
     assert_eq!(resp.status(), StatusCode::OK);
     let r = body_json(resp).await;
-    assert!(r["delta_years"].as_f64().unwrap() > 0.0, "cleaner+greener location adds years");
-    assert!(r["breakdown"]["air_delta_years"].as_f64().is_some());
-    assert!(r["breakdown"]["greenspace_delta_years"].as_f64().is_some());
+    assert!(r["delta_years"].as_f64().unwrap() > 0.0, "cleaner location adds years");
+    assert!(r["breakdown"]["air_delta_years"].as_f64().is_some(), "air is priced: RO has a reference");
+    // Greenness IS priced for Romania, and the honest answer is that it does not change within the
+    // country: only Bucuresti has its own measured NDVI, so every other Romanian settlement shows the
+    // national figure and an intra-Romanian move changes air alone. The test asserts the number is
+    // PRESENT (not null — that would mean "no layer") and that the screen is told which basis it is on.
+    assert!(r["breakdown"]["greenspace_delta_years"].as_f64().is_some(),
+            "greenspace is priced, not refused — Romania has an NDVI reference");
+    assert_eq!(r["to"]["ndvi_basis"], "country",
+               "Brasov's greenness is Romania's figure, and the payload says so");
+    assert_eq!(r["reference"]["pm25"].as_f64().unwrap().round(), 10.0,
+               "priced against WHO's measured Romanian average, not the old constant 14.0");
 
     // Reverse move loses years (symmetric).
-    let rev = body_json(call(&s, post("/api/relocate", json!({"base": base, "from": "Brașov", "to": "Bucharest"}))).await).await;
+    let rev = body_json(call(&s, post("/api/relocate", json!({"base": base, "from": "Brasov", "to": "Bucuresti"}))).await).await;
     assert!(rev["delta_years"].as_f64().unwrap() < 0.0, "dirtier location costs years");
 
     // Unknown target → 404.
     assert_eq!(
         call(&s, post("/api/relocate", json!({"base": base, "to": "Atlantis"}))).await.status(),
         StatusCode::NOT_FOUND);
+
+    // A cross-border move is REFUSED in words, not answered with the origin's life table. This was
+    // silently wrong: the destination's exposures were scored against the origin's death rates and the
+    // origin's exposure reference, which is not any country's answer.
+    let cross = call(&s, post("/api/relocate",
+        json!({"base": base, "country": "DE", "to": "Berlin"}))).await;
+    assert_eq!(cross.status(), StatusCode::BAD_REQUEST, "cross-border relocate is refused");
+    let msg = body_json(cross).await["error"].as_str().unwrap().to_string();
+    assert!(msg.contains("national death rates"), "the refusal says WHY: {msg}");
     });
 }
 
@@ -1143,7 +1167,13 @@ fn locations_and_home_location() {
     RT.block_on(async {
     let s = state().await;
     let locs = body_json(call(&s, get("/api/locations")).await).await;
-    assert!(locs.as_array().unwrap().len() >= 5, "locations seeded and public");
+    // 3,521 real settlements, not seven invented ones. The floor is deliberately far above the old
+    // seven so a regression to a hand-written seed fails here rather than looking plausible.
+    assert!(locs.as_array().unwrap().len() > 3000,
+            "real settlements seeded and public, got {}", locs.as_array().unwrap().len());
+    // And none of them is a fiction: every row carries the year its reading was taken.
+    assert!(locs.as_array().unwrap().iter().all(|l| l["pm25_year"].as_i64().is_some()),
+            "every location carries the year it was measured");
 
     let token = register_token(&s).await;
     // Unknown location → 404.
@@ -1151,7 +1181,8 @@ fn locations_and_home_location() {
         call(&s, post_auth("/api/profile/location", json!({"name": "Atlantis"}), &token)).await.status(),
         StatusCode::NOT_FOUND);
     // Set a known location.
-    let resp = call(&s, post_auth("/api/profile/location", json!({"name": "Cluj-Napoca"}), &token)).await;
+    // WHO's own spelling. The old seed called it "Cluj-Napoca"; the measured settlement is "Cluj Napoca".
+    let resp = call(&s, post_auth("/api/profile/location", json!({"name": "Cluj Napoca"}), &token)).await;
     assert_eq!(resp.status(), StatusCode::OK);
     assert!(body_json(resp).await["home_location_id"].as_str().is_some());
     // Profile reflects it.
@@ -1159,7 +1190,7 @@ fn locations_and_home_location() {
     assert!(p["home_location_id"].as_str().is_some(), "home location saved on the profile");
     // No auth → 401.
     assert_eq!(
-        call(&s, post("/api/profile/location", json!({"name": "Cluj-Napoca"}))).await.status(),
+        call(&s, post("/api/profile/location", json!({"name": "Cluj Napoca"}))).await.status(),
         StatusCode::UNAUTHORIZED);
     });
 }
@@ -1316,7 +1347,7 @@ fn incompatible_bundle_refused_at_load() {
     // existed only to be refused, so ONT-04 deleted them and the test builds what it needs. Each
     // variant strips exactly one thing the scoring design requires.
     let good: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string("bundle/model-v4.0.0/coefficients.json").unwrap(),
+        &std::fs::read_to_string("bundle/model-v4.1.1/coefficients.json").unwrap(),
     )
     .unwrap();
 
@@ -1362,10 +1393,10 @@ fn incompatible_bundle_refused_at_load() {
 /// cannot explain must be refused.
 #[test]
 fn unsurfaced_lever_refused_at_load() {
-    let coefs = std::fs::read_to_string("bundle/model-v4.0.0/coefficients.json").unwrap();
+    let coefs = std::fs::read_to_string("bundle/model-v4.1.1/coefficients.json").unwrap();
     let good_coefs: serde_json::Value = serde_json::from_str(&coefs).unwrap();
     let good_ont: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string("bundle/model-v4.0.0/ontology.json").unwrap(),
+        &std::fs::read_to_string("bundle/model-v4.1.1/ontology.json").unwrap(),
     )
     .unwrap();
 
@@ -1414,7 +1445,7 @@ fn unsurfaced_lever_refused_at_load() {
 #[test]
 fn literature_gate_refuses_each_malformed_variant() {
     let good: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string("bundle/model-v4.0.0/coefficients.json").unwrap(),
+        &std::fs::read_to_string("bundle/model-v4.1.1/coefficients.json").unwrap(),
     )
     .unwrap();
 
@@ -1506,7 +1537,7 @@ fn literature_levers_surface_everywhere() {
 #[test]
 fn seed_roles_match_the_shipped_ontology() {
     let ont: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string("bundle/model-v4.0.0/ontology.json").unwrap(),
+        &std::fs::read_to_string("bundle/model-v4.1.1/ontology.json").unwrap(),
     )
     .unwrap();
     let feats: Vec<serde_json::Value> = serde_json::from_str(
@@ -1566,7 +1597,7 @@ fn reconciliation_spares_admin_authored_rules() {
     .unwrap();
 
     // Reconcile again, exactly as a restart would.
-    seed::reconcile(&s.pool, &s.bundle.manifest, "bundle/model-v4.0.0").await.unwrap();
+    seed::reconcile(&s.pool, &s.bundle.manifest, "bundle/model-v4.1.1", &s.bundle).await.unwrap();
 
     let still_active: bool = sqlx::query_scalar("SELECT active FROM recommendation_rule WHERE code = $1")
         .bind(&code)
@@ -1588,7 +1619,7 @@ fn reconciliation_spares_admin_authored_rules() {
     .execute(&s.pool)
     .await
     .unwrap();
-    seed::reconcile(&s.pool, &s.bundle.manifest, "bundle/model-v4.0.0").await.unwrap();
+    seed::reconcile(&s.pool, &s.bundle.manifest, "bundle/model-v4.1.1", &s.bundle).await.unwrap();
     let active: bool = sqlx::query_scalar("SELECT active FROM recommendation_rule WHERE code = $1")
         .bind(&gone).fetch_one(&s.pool).await.unwrap();
     assert!(!active, "a seed-owned rule missing from the seed must be withdrawn");
@@ -1724,7 +1755,7 @@ fn a_reference_country_with_no_life_table_is_refused_at_load() {
     let dir = std::env::temp_dir().join(format!("clock-empty-ref-{}", std::process::id()));
     std::fs::create_dir_all(dir.join("baselines")).unwrap();
     for name in ["coefficients.json", "ontology.json", "evidence.json"] {
-        std::fs::copy(format!("bundle/model-v4.0.0/{name}"), dir.join(name)).ok();
+        std::fs::copy(format!("bundle/model-v4.1.1/{name}"), dir.join(name)).ok();
     }
     std::fs::write(
         dir.join("baselines").join("XX.json"),
@@ -1858,5 +1889,119 @@ fn the_atlas_is_cached_by_its_own_content() {
         req = req.header("if-none-match", &etag);
         let second = call(&s, req.body(axum::body::Body::empty()).unwrap()).await;
         assert_eq!(second.status(), 304, "a matching validator must not resend the world");
+    });
+}
+
+/// The deletion migration actually deletes. Create-then-consume, because a seeder that only upserts
+/// cannot remove anything, and "the seed file no longer mentions Bucharest" is not the same fact as
+/// "Bucharest is gone from the database".
+///
+/// This is the test the plan asked for and the one that would have caught the real failure mode: a
+/// database that has ever booted keeps `Bucharest, pm25 = 19.0` forever, invisibly, under a product
+/// that has stopped claiming to have invented it.
+#[test]
+fn illustrative_locations_cannot_survive_a_boot() {
+    RT.block_on(async {
+    let s = state().await;
+
+    // Re-create a row shaped exactly like the ones that used to ship: no source, no measurement year.
+    sqlx::query(
+        "INSERT INTO location (name, country, pm25, ndvi, area_type, as_of)
+         VALUES ('Atlantis (illustrative)', 'RO', 19.0, 0.35, 'city', DATE '2024-01-01')
+         ON CONFLICT (name, country) DO UPDATE SET pm25 = EXCLUDED.pm25, source = NULL",
+    )
+    .execute(&s.pool)
+    .await
+    .unwrap();
+
+    let before: i64 = sqlx::query_scalar("SELECT count(*) FROM location WHERE source IS NULL")
+        .fetch_one(&s.pool).await.unwrap();
+    assert!(before > 0, "the fixture planted a sourceless row");
+
+    // What the migration does, run as the migration runs it.
+    sqlx::query("UPDATE profile SET home_location_id = NULL WHERE home_location_id IN \
+                 (SELECT id FROM location WHERE source IS NULL)")
+        .execute(&s.pool).await.unwrap();
+    sqlx::query("DELETE FROM location WHERE source IS NULL").execute(&s.pool).await.unwrap();
+
+    let after: i64 = sqlx::query_scalar("SELECT count(*) FROM location WHERE source IS NULL")
+        .fetch_one(&s.pool).await.unwrap();
+    assert_eq!(after, 0, "every sourceless row is gone");
+
+    // And re-seeding does not bring it back — the seed no longer contains it.
+    seed::reconcile(&s.pool, &s.bundle.manifest, "bundle/model-v4.1.1", &s.bundle).await.unwrap();
+    let revived: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM location WHERE name = 'Atlantis (illustrative)'")
+        .fetch_one(&s.pool).await.unwrap();
+    assert_eq!(revived, 0, "the seeder does not resurrect it");
+
+    // Every surviving row is real: a source, a measurement year, and greenness that either carries its
+    // provenance word or is absent.
+    let bad: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM location WHERE source IS NULL OR pm25_year IS NULL \
+         OR (ndvi IS NOT NULL AND ndvi_basis IS NULL)")
+        .fetch_one(&s.pool).await.unwrap();
+    assert_eq!(bad, 0, "no location carries a value without its provenance");
+
+    // The string that described the old seed appears nowhere in what is served.
+    let locs = body_json(call(&s, get("/api/locations")).await).await;
+    assert!(!locs.to_string().to_lowercase().contains("illustrative"),
+            "the word 'illustrative' is gone from the served locations");
+    });
+}
+
+/// API: the settlement picker. Bundle-derived, cached, and honest about countries nobody has measured.
+#[test]
+fn places_endpoint_is_real_and_says_what_is_missing() {
+    RT.block_on(async {
+    let s = state().await;
+
+    let resp = call(&s, get("/api/places/ROU")).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let etag = resp.headers().get("etag").unwrap().to_str().unwrap().to_string();
+    let r = body_json(resp).await;
+    let places = r["places"].as_array().unwrap();
+    assert_eq!(places.len(), 60, "Romania has 60 measured settlements, not 7 invented ones");
+    assert_eq!(r["scoreable"], true, "a Romanian reader can get a personal number");
+    assert_eq!(r["iso2"], "RO");
+    // The reference the ENV term is centred on travels with the list, so a client can show a reading
+    // against its own country's average rather than against nothing.
+    assert!((r["reference"]["pm25"].as_f64().unwrap() - 10.412).abs() < 0.001,
+            "WHO's measured Romanian average, not the deleted constant 14.0");
+    assert_eq!(r["reference"]["ndvi_cities"], 1, "Romania's greenness rests on one city");
+    assert_eq!(r["reference"]["ndvi_derived_from"][0], "Bucuresti", "and it names it");
+
+    // Every place carries the year and the provenance word.
+    assert!(places.iter().all(|p| p["pm25_year"].as_i64().is_some_and(|y| (2020..=2025).contains(&y))),
+            "every reading is inside the declared window");
+    let buc = places.iter().find(|p| p["city"] == "Bucuresti").unwrap();
+    assert_eq!(buc["ndvi_basis"], "city", "Bucharest has its OWN measured greenness");
+    let other = places.iter().find(|p| p["city"] == "Brasov").unwrap();
+    assert_eq!(other["ndvi_basis"], "country", "Brasov shows Romania's, and says so");
+    // The coverage sentence the screen must be able to say, computed from the payload.
+    assert_eq!(r["coverage"]["settlements"], 60);
+    assert_eq!(r["coverage"]["with_city_greenness"], 1);
+
+    // A country with a life table and no measurement is a 404 with a reason, not an empty array —
+    // an empty array reads as a loading bug, and this is a fact about the measurement, not the country.
+    let none = call(&s, get("/api/places/TCD")).await;
+    assert_eq!(none.status(), StatusCode::NOT_FOUND);
+    let reason = body_json(none).await["reason"].as_str().unwrap().to_string();
+    assert!(reason.contains("since 2020"), "the refusal dates itself: {reason}");
+
+    // A non-scoreable country still lists its settlements, and says a personal number is not available.
+    let ng = call(&s, get("/api/places/NGA")).await;
+    if ng.status() == StatusCode::OK {
+        let b = body_json(ng).await;
+        assert_eq!(b["scoreable"], false, "Nigeria has places but no personal estimate");
+        assert!(!b["places"].as_array().unwrap().is_empty());
+    }
+
+    // ETag round-trip: a revalidating client gets 304 and no body.
+    let req = axum::http::Request::builder()
+        .method("GET").uri("/api/places/ROU")
+        .header("if-none-match", &etag)
+        .body(Body::empty()).unwrap();
+    assert_eq!(call(&s, req).await.status(), StatusCode::NOT_MODIFIED);
     });
 }

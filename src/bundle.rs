@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 #[derive(Deserialize, Clone)]
@@ -72,6 +72,76 @@ pub struct RefLp {
     pub old: f64,
 }
 
+/// What an average person in a country is actually exposed to — the value the ENV term is CENTRED on.
+///
+/// This replaces two hardcoded constants (`RO_PM25_REF = 14.0`, `RO_NDVI_REF = 0.5`) that were wrong
+/// for Romania and applied to every country. WHO's measured Romanian total for 2023 is 10.412 and
+/// Bucharest's population-weighted NDVI is 0.2539.
+///
+/// `ndvi` is `Option` and stays one all the way through: a country nobody has measured has no
+/// greenness reference, and a `0.0` there would be priced as "this country is barren". `ndvi_cities`
+/// is how many cities the national figure was derived from — 22 of the 30 scoreable countries rest on
+/// exactly one, and anything that shows the number has to be able to say so.
+#[derive(Deserialize, Serialize, Clone)]
+pub struct EnvReference {
+    pub pm25: f64,
+    pub pm25_low: Option<f64>,
+    pub pm25_high: Option<f64>,
+    pub pm25_year: Option<i32>,
+    #[serde(default)]
+    pub pm25_by_area: HashMap<String, f64>,
+
+    pub ndvi: Option<f64>,
+    pub ndvi_year: Option<i32>,
+    #[serde(default)]
+    pub ndvi_cities: i32,
+    pub ndvi_weighted: Option<bool>,
+    /// The cities the national figure was derived from — `None`, not `[]`, where there are none. An
+    /// empty vec would be indistinguishable from "derived from cities, but we lost the list".
+    ///
+    /// `Option` rather than `#[serde(default)]`, because `serde(default)` fills in only for an ABSENT
+    /// field and the model emits an explicit `null`. That difference failed ten tests on Andorra, which
+    /// has a measured air figure and no green city at all.
+    pub ndvi_derived_from: Option<Vec<String>>,
+}
+
+/// One real settlement with a measured PM2.5 reading, and greenness that is either its own or its
+/// country's — `ndvi_basis` says which, and that word is not optional.
+///
+/// These replace the seven invented Romanian rows that `seeds/locations.json` described as
+/// "ILLUSTRATIVE" and that shipped anyway.
+#[derive(Deserialize, Serialize, Clone)]
+pub struct Place {
+    pub iso3: String,
+    pub city: String,
+    pub lat: f64,
+    pub lon: f64,
+    pub population: Option<i64>,
+    pub pm25: f64,
+    pub pm25_year: i32,
+    pub pm25_stations: Option<i32>,
+    pub pm25_temporal_coverage: Option<f64>,
+    pub ndvi: Option<f64>,
+    pub ndvi_year: Option<i32>,
+    /// "city" — measured in this settlement. "country" — this country's figure, shown here because
+    /// this settlement has none. `None` — no greenness at all. The screen must print the distinction.
+    pub ndvi_basis: Option<String>,
+    pub ndvi_matched_city: Option<String>,
+    pub ndvi_distance_km: Option<f64>,
+}
+
+#[derive(Deserialize, Serialize, Clone)]
+pub struct Licence {
+    pub licence: String,
+    pub url: Option<String>,
+    #[serde(default)]
+    pub applies_to: Vec<String>,
+    #[serde(default)]
+    pub share_alike: bool,
+    #[serde(default)]
+    pub non_commercial: bool,
+}
+
 #[derive(Deserialize)]
 pub struct Baseline {
     pub country: String,
@@ -79,6 +149,9 @@ pub struct Baseline {
     pub qx: HashMap<String, HashMap<String, f64>>,
     pub reference_lp: RefLp,
     pub national_le_40: HashMap<String, f64>,
+    /// Absent for a country WHO has never measured. The scoring path must then refuse to price the
+    /// environment rather than price it against somebody else's country.
+    pub env_reference: Option<EnvReference>,
 }
 
 /// A country the atlas may DRAW but the clock may not score.
@@ -98,6 +171,9 @@ pub struct ReferenceBaseline {
     pub lifetable_year: Option<i32>,
     /// sex ("M"/"F"/"B") -> age (as string) -> probability of death that year
     pub qx: HashMap<String, HashMap<String, f64>>,
+    /// Carried on the reference set too, so the atlas can draw exposure for the 85 countries that have
+    /// it without the map having to reach into the scoreable 30.
+    pub env_reference: Option<EnvReference>,
 }
 
 #[derive(Deserialize)]
@@ -119,6 +195,13 @@ pub struct Manifest {
     /// artifact rather than from a string somebody typed into the front end.
     #[serde(default)]
     pub sources: Vec<serde_json::Value>,
+    /// Where the exposure VALUES came from, beside where the exposure RESPONSE came from.
+    #[serde(default)]
+    pub env_sources: Option<serde_json::Value>,
+    /// The licences this bundle's CONTENTS oblige — WHO's air data is CC BY-NC-SA 3.0 IGO, which is
+    /// share-alike and attaches to anything distributed containing it, this service included.
+    #[serde(default)]
+    pub licences: Option<Vec<Licence>>,
     pub checksums: HashMap<String, String>,
     /// Provenance used to seed the `model_version` row (optional — absent in older bundles).
     #[serde(default)]
@@ -155,6 +238,9 @@ pub struct Bundle {
     /// Every country with a life table, scoreable or not — what the atlas may draw. Empty for
     /// pre-v4.0.0 bundles, which had only the scoreable set.
     pub reference: HashMap<String, ReferenceBaseline>,
+    /// Every real settlement with a measured PM2.5 reading. Empty for a pre-v4.1.0 bundle, which is
+    /// the case the seeder must refuse rather than quietly leave the invented rows in place.
+    pub places: Vec<Place>,
     /// feature key -> {role, grade, citation, doi, url}; empty if the bundle ships no evidence.json.
     pub evidence: HashMap<String, Evidence>,
     /// The full ontology as shipped (roles, sign/shape constraints, causal graph, verified
@@ -388,6 +474,28 @@ impl Bundle {
             qx_ok(iso, &b.qx)?;
             reference.insert(iso.clone(), b);
         }
+        // The settlements. Absent for a pre-v4.1.0 bundle — allowed to be empty here so the service
+        // still boots on an older artifact, and refused where it MATTERS: the seeder will not run
+        // against an empty list, because "no places" would silently leave the invented rows in place.
+        let places_path = dir.join("places.json");
+        let places: Vec<Place> = if places_path.exists() { read_json(&places_path)? } else { Vec::new() };
+        for p in &places {
+            // A greenness value with no word for where it came from renders as a measurement of this
+            // city. The model gate refuses to emit one; this refuses to load one.
+            match (p.ndvi, p.ndvi_basis.as_deref()) {
+                (Some(_), Some("city")) | (Some(_), Some("country")) | (None, None) => {}
+                (v, b) => return Err(format!(
+                    "places.json: {}/{} has ndvi={v:?} with basis {b:?} — a value without its \
+                     provenance, or the reverse; refusing this bundle", p.iso3, p.city)),
+            }
+            if !p.pm25.is_finite() || p.pm25 <= 0.0 {
+                return Err(format!("places.json: {}/{} has pm25 {} — refusing", p.iso3, p.city, p.pm25));
+            }
+            if !(-90.0..=90.0).contains(&p.lat) || !(-180.0..=180.0).contains(&p.lon) {
+                return Err(format!("places.json: {}/{} is not on Earth", p.iso3, p.city));
+            }
+        }
+
         // Scoreable must be a subset of drawable, or /api/meta offers a country the atlas cannot show.
         if !manifest.reference_countries.is_empty() {
             let drawable: std::collections::HashSet<&String> =
@@ -414,6 +522,6 @@ impl Bundle {
                 return Err(format!("manifest: alias {from} shadows a real baseline"));
             }
         }
-        Ok(Bundle { manifest, coefficients, baselines, reference, evidence, ontology })
+        Ok(Bundle { manifest, coefficients, baselines, reference, places, evidence, ontology })
     }
 }

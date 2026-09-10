@@ -92,7 +92,7 @@ def main():
         check("GET /health 200", get("/health")[0] == 200)
 
         s, meta = get("/api/meta")
-        check("GET /api/meta model 4.0.0", meta.get("model_version") == "4.0.0", str(meta.get("model_version")))
+        check("GET /api/meta model 4.1.1", meta.get("model_version") == "4.1.1", str(meta.get("model_version")))
         # Still 30, and that is the point: the bundle now carries 237 life tables so the atlas can
         # draw the world, while /api/meta keeps promising only the countries that can be CENTRED.
         # If this ever reads 237, every non-European user is being scored against a US cohort mean.
@@ -151,7 +151,7 @@ def main():
 
         # 1. Unanswered levers and answers at their centring reference are the same number.
         #    (The bundle's references: standardizer means for diet/sedentary/stress, level "light"
-        #    for alcohol — see bundle/model-v4.0.0/coefficients.json. A bundle change makes this
+        #    for alcohol — see bundle/model-v4.1.1/coefficients.json. A bundle change makes this
         #    FAIL loudly rather than drift.) relative_risk is compared too: it is rounded to 3 dp
         #    against the years' 1 dp, so it catches a centring drift ~6x smaller.
         at_reference = {**plain, "diet_score": 2.5, "sitting_hours": 6.0,
@@ -243,7 +243,7 @@ def main():
             {"question_code": "Q18_alcohol", "value": "heavy"},
             {"question_code": "Q19_stress", "value": [3, 1, 1, 3]},   # PSS-4 battery
             {"question_code": "Q20_mood", "value": [1, 0]},           # PHQ-2 battery
-            {"question_code": "Q23_location", "value": {"name": "Cluj-Napoca", "country": "RO"}},
+            {"question_code": "Q23_location", "value": {"name": "Cluj Napoca", "country": "RO"}},
         ]
         s, saved = post("/api/answers", {"answers": answers}, token)
         check("interview: every answer shape the web sends is accepted",
@@ -256,12 +256,33 @@ def main():
               stored.get("Q19_stress") == [3, 1, 1, 3] and stored.get("Q20_mood") == [1, 0],
               str(stored.get("Q19_stress")))
         check("interview: the location answer keeps its object shape",
-              (stored.get("Q23_location") or {}).get("name") == "Cluj-Napoca")
-        s, _ = post("/api/profile/location", {"name": "Cluj-Napoca", "country": "RO"}, token)
+              (stored.get("Q23_location") or {}).get("name") == "Cluj Napoca")
+        # "Cluj Napoca", not "Cluj-Napoca": the hyphenated name was one of the seven invented rows and
+        # is gone. WHO's measured settlement spells it with a space.
+        s, _ = post("/api/profile/location", {"name": "Cluj Napoca", "country": "RO"}, token)
         check("interview: the home location is accepted", s == 200, str(s))
         s, profile = get_auth("/api/profile", token)
         check("interview: the home location reads back on the profile",
               bool(s == 200 and profile.get("home_location_id")), str(s))
+
+        s, pl = get("/api/places/ROU")
+        check("places: Romania lists 60 measured settlements, not 7 invented ones",
+              s == 200 and len(pl.get("places", [])) == 60,
+              f"{s} / {len(pl.get('places', []))}")
+        check("places: the exposure reference is WHO's measured 10.412, not the deleted 14.0",
+              abs((pl.get("reference") or {}).get("pm25", 0) - 10.412) < 0.001,
+              str((pl.get("reference") or {}).get("pm25")))
+        check("places: every reading carries its year, and its greenness carries its basis",
+              all(p.get("pm25_year") and (p.get("ndvi") is None) == (p.get("ndvi_basis") is None)
+                  for p in pl.get("places", [])))
+        s, body = get("/api/places/TCD")
+        check("places: a country with no measurement since 2020 is a 404 with a reason, not an empty list",
+              s == 404 and "since 2020" in str(body.get("reason", "")), str(s))
+        s, body = post("/api/relocate", {"base": {"country": "RO", "age": 45, "sex": "M", "smoke": 0,
+                                                  "pa_min": 600, "sleep": 7, "waist": 90},
+                                         "country": "DE", "to": "Berlin"}, None)
+        check("relocate: a cross-border move is refused in words, not answered with the wrong life table",
+              s == 400 and "national death rates" in str(body.get("error", "")), str(s))
 
         # Probe hygiene: erase the account we created, so runs don't accrete *accounts*. (The
         # unauthenticated estimates above still persist calculation rows to the shared anonymous

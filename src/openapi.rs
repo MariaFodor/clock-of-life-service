@@ -62,7 +62,8 @@ pub fn openapi_doc() -> Value {
             "/api/estimate": { "post": optional_auth_op("Answers -> Life Clock + why[] + model; persists a calculation", "scoring") },
             "/api/recommendations": { "post": op("Prioritized, evidence-cited recommendations", false, "scoring") },
             "/api/whatif": { "post": optional_auth_op("Lifestyle-change overlay (levers incl. cigarettes/day, diet/alcohol/sitting/stress; sleep is refused as a marker, as is a zero dose from a current smoker); persists a scenario if base given", "scoring") },
-            "/api/relocate": { "post": op("Where Should I Live? location comparison", false, "environment") },
+            "/api/relocate": { "post": op("Where Should I Live? — compares two measured settlements INSIDE one country; a cross-border request is refused, because moving countries changes the national death rates and not only the air", false, "environment") },
+            "/api/places/{iso3}": { "get": op("Every WHO-measured settlement in one country, with its PM2.5 reading and year, its greenness and whether that greenness is its own or its country's, plus the exposure reference the ENV term is centred on; 404 with a reason for a country with no measurement since 2020; ETag-cached", false, "environment") },
 
             "/api/calculations": { "get": op("The caller's calculation history", true, "history") },
             "/api/answers": {

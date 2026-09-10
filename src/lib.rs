@@ -80,6 +80,14 @@ pub struct AppState {
     pub atlas: Arc<String>,
     /// Validator for the atlas body. Strong, because it is a digest of the exact bytes served.
     pub atlas_etag: String,
+    /// ISO3 -> the pre-serialized settlement list for that country, with its own validator.
+    ///
+    /// Pre-serialized per country for the same reason the atlas is: the picker asks for one country and
+    /// serializing 3,522 settlements to return 60 of them is work done on every request. Derived from
+    /// the BUNDLE rather than from the `location` table, so what the picker shows and what the scorer
+    /// prices cannot drift — this product has already shipped one map that disagreed with its own clock
+    /// by 3.6 years because a second copy of the data existed.
+    pub places: HashMap<String, (Arc<String>, String)>,
 }
 
 /// Connection string for the application database (unix socket + peer auth by default).
@@ -120,13 +128,14 @@ pub async fn init_state(bundle_dir: &str, database_url: &str) -> Result<Arc<AppS
     db::run_migrations(&pool)
         .await
         .map_err(|e| format!("db migrate: {e}"))?;
-    let seeded = seed::reconcile(&pool, &b.manifest, bundle_dir)
+    let seeded = seed::reconcile(&pool, &b.manifest, bundle_dir, &b)
         .await
         .map_err(|e| format!("db reconcile: {e}"))?;
     let atlas = Arc::new(build_atlas(&b).to_string());
     // A 16-hex digest of the body itself, not of the version: a bundle rebuilt at the same version
     // would otherwise serve a stale cached map.
     let atlas_etag = format!("\"atlas-{}\"", bundle::checksum16_of(&atlas));
+    let places = build_places(&b);
     Ok(Arc::new(AppState {
         bundle: Arc::new(b),
         pool,
@@ -138,6 +147,7 @@ pub async fn init_state(bundle_dir: &str, database_url: &str) -> Result<Arc<AppS
         web_dist: std::env::var("WEB_DIST").unwrap_or_else(|_| "web-dist".to_string()),
         atlas,
         atlas_etag,
+        places,
     }))
 }
 
@@ -158,6 +168,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/estimate", post(estimate_route))
         .route("/api/recommendations", post(recommendations_route))
         .route("/api/relocate", post(relocate_route))
+        .route("/api/places/:iso3", get(places_route))
         .route("/api/whatif", post(whatif_route))
         .route("/api/calculations", get(calculations_route))
         .route("/api/profile", get(profile_route))
@@ -377,6 +388,103 @@ async fn atlas_route(State(s): State<Arc<AppState>>, headers: HeaderMap) -> Resp
             ("content-type", "application/json".to_string()),
         ],
         (*s.atlas).clone(),
+    )
+        .into_response()
+}
+
+/// Group the bundle's settlements by ISO3 and serialize each group once, with its own strong ETag.
+///
+/// Takes `&Bundle` and nothing else — the same purity argument as `build_atlas`: it runs in
+/// `init_state` before a router exists, so it cannot read user data, and that is a property of the
+/// signature rather than of a test.
+fn build_places(b: &Bundle) -> HashMap<String, (Arc<String>, String)> {
+    let mut by_country: HashMap<&str, Vec<&crate::bundle::Place>> = HashMap::new();
+    for p in &b.places {
+        by_country.entry(p.iso3.as_str()).or_default().push(p);
+    }
+    // ISO3 -> ISO2, so the response can tell a client whether a personal estimate is possible here at
+    // all. Built from the bundle's own baselines rather than a second table.
+    let iso3_to_iso2: HashMap<&str, &str> = b
+        .reference
+        .iter()
+        .filter_map(|(iso2, r)| r.iso3.as_deref().map(|iso3| (iso3, iso2.as_str())))
+        .collect();
+
+    by_country
+        .into_iter()
+        .map(|(iso3, mut places)| {
+            places.sort_by(|a, c| a.city.cmp(&c.city));
+            let iso2 = iso3_to_iso2.get(iso3).copied();
+            let reference = iso2
+                .and_then(|i| b.reference.get(i))
+                .and_then(|r| r.env_reference.as_ref());
+            let body = json!({
+                "iso3": iso3,
+                "iso2": iso2,
+                "name": iso2.and_then(|i| b.reference.get(i)).and_then(|r| r.name.clone()),
+                // Whether the clock can give a PERSONAL number for someone living here. A picker that
+                // offers a Nigerian city without saying this produces a dead click at the end.
+                "scoreable": iso2.is_some_and(|i| b.baselines.contains_key(i)),
+                // What the ENV term is centred on here, so a client can show a place's reading against
+                // its own country's average rather than against nothing.
+                "reference": reference,
+                "places": places,
+                // The coverage sentence the screen has to be able to say, computed rather than written.
+                "coverage": {
+                    "settlements": places.len(),
+                    "with_city_greenness":
+                        places.iter().filter(|p| p.ndvi_basis.as_deref() == Some("city")).count(),
+                    "with_country_greenness":
+                        places.iter().filter(|p| p.ndvi_basis.as_deref() == Some("country")).count(),
+                    "without_greenness": places.iter().filter(|p| p.ndvi_basis.is_none()).count(),
+                },
+            })
+            .to_string();
+            let etag = format!("\"places-{}-{}\"", iso3, bundle::checksum16_of(&body));
+            (iso3.to_string(), (Arc::new(body), etag))
+        })
+        .collect()
+}
+
+/// Every measured settlement in one country (public — powers the home-location picker).
+///
+/// 404 rather than an empty list when a country has no settlements: "no measurement since 2020" is a
+/// fact about 153 of the 237 countries the atlas draws, and an empty array reads as a loading bug.
+async fn places_route(
+    State(s): State<Arc<AppState>>,
+    AxumPath(iso3): AxumPath<String>,
+    headers: HeaderMap,
+) -> Response {
+    let iso3 = iso3.to_uppercase();
+    let Some((body, etag)) = s.places.get(&iso3) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "error": format!("no measured settlements for {iso3}"),
+                "reason": "WHO has published no PM2.5 measurement for any settlement in this country \
+                           since 2020. This is a gap in the measurement, not in the country.",
+            })),
+        )
+            .into_response();
+    };
+    if headers
+        .get("if-none-match")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.split(',').any(|t| t.trim() == etag))
+    {
+        return (
+            StatusCode::NOT_MODIFIED,
+            [("etag", etag.clone()), ("cache-control", "public, max-age=86400".to_string())],
+        )
+            .into_response();
+    }
+    (
+        [
+            ("etag", etag.clone()),
+            ("cache-control", "public, max-age=86400".to_string()),
+            ("content-type", "application/json".to_string()),
+        ],
+        (**body).clone(),
     )
         .into_response()
 }
@@ -716,6 +824,32 @@ async fn relocate_route(
     Json(req): Json<RelocateRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let round1 = |x: f64| (x * 10.0).round() / 10.0;
+
+    // The cross-border case, refused in words rather than answered wrongly.
+    //
+    // `req.country` and `req.base.country` are separate fields, and nothing checked that they agreed.
+    // Moving to a city in another country therefore looked up the DESTINATION's exposures and scored
+    // them against the ORIGIN's life table and the ORIGIN's exposure reference — exposure arithmetic
+    // wearing a national-mortality label. A German city's 8 µg/m³ was priced as a deviation from
+    // Romania's 10.4 and then applied to Romanian death rates, which is not any country's answer.
+    //
+    // Refusing is the honest move here rather than re-basing: a real cross-border answer has to change
+    // the life table too, and most destinations are not scoreable at all (30 of 237), so the feature
+    // would silently work for some borders and not others.
+    let alias = |c: &String| s.bundle.manifest.country_aliases.get(c).unwrap_or(c).clone();
+    if alias(&req.country) != alias(&req.base.country) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "this compares places inside one country. Your profile says {} and you asked about a \
+                 place in {} — moving between countries changes the national death rates the estimate \
+                 is built on, not just the air, and this cannot yet account for that.",
+                req.base.country, req.country
+            ),
+        )
+            .into());
+    }
+
     let to = db::location_by_name(&s.pool, &req.to, &req.country)
         .await
         .map_err(db_err)?
@@ -750,15 +884,63 @@ async fn relocate_route(
     green.ndvi = to.ndvi;
     let green_years = estimate(&s.bundle, &green).map_err(bad)?.estimate_years;
 
+    // What could not be priced, and why — so the breakdown can say "no layer" instead of "+0.0 years".
+    //
+    // `0.0` was the answer to both "this makes no difference here" and "nobody has measured greenness in
+    // your country", and a reader cannot tell those apart. 3,067 of the 3,522 settlements carry their
+    // country's greenness rather than their own, and 29 carry none at all.
+    let reference = s
+        .bundle
+        .manifest
+        .country_aliases
+        .get(&req.base.country)
+        .unwrap_or(&req.base.country)
+        .clone();
+    let env_ref = s.bundle.baselines.get(&reference).and_then(|b| b.env_reference.as_ref());
+    let (_, refused) = scoring::env_term_with_reason(to.pm25, to.ndvi, env_ref);
+    let unpriced = |key: &str| {
+        refused
+            .iter()
+            .any(|(k, r)| *k == key && *r == scoring::EnvRefused::NoReference)
+    };
+    let air_delta = if unpriced("pm25") {
+        serde_json::Value::Null
+    } else {
+        json!(round1(air_years - current))
+    };
+    let green_delta = if unpriced("ndvi") {
+        serde_json::Value::Null
+    } else {
+        json!(round1(green_years - current))
+    };
+
     Ok(Json(json!({
         "from": from_json,
-        "to": {"name": to.name, "pm25": to.pm25, "ndvi": to.ndvi},
+        "to": {
+            "name": to.name, "pm25": to.pm25, "ndvi": to.ndvi,
+            // Whether this settlement's greenness is its own measurement or its country's figure shown
+            // here for want of one. The screen must print the difference.
+            "ndvi_basis": to.ndvi_basis,
+            "pm25_year": to.pm25_year, "ndvi_year": to.ndvi_year,
+        },
+        "reference": env_ref,
         "current_years": current,
         "relocated_years": relocated,
         "delta_years": round1(relocated - current),
         "breakdown": {
-            "air_delta_years": round1(air_years - current),
-            "greenspace_delta_years": round1(green_years - current),
+            "air_delta_years": air_delta,
+            "greenspace_delta_years": green_delta,
+            // Present only when something was refused, so a client cannot render an empty reason.
+            "unpriced": if refused.iter().any(|(_, r)| *r == scoring::EnvRefused::NoReference) {
+                json!(refused.iter()
+                    .filter(|(_, r)| *r == scoring::EnvRefused::NoReference)
+                    .map(|(k, _)| json!({
+                        "component": k,
+                        "reason": format!("no measured {k} reference for {reference} — a change \
+                                           cannot be priced against an average nobody has measured"),
+                    }))
+                    .collect::<Vec<_>>())
+            } else { serde_json::Value::Null },
         },
         "note": "statistical scenario; location exposure is ecological (assigned by area, not measured) — medium confidence, not a promise",
     })))

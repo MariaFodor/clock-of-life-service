@@ -31,7 +31,7 @@ cargo test
   loader), `db.rs` (pool, migrations, queries), `seed.rs` (startup reconciliation), `main.rs` (binary).
 - `migrations/` — SQLx migrations (the full 11-table schema).
 - `seeds/` — desired-state `feature` and `question` reference data seeded on startup.
-- `bundle/model-v4.0.0/` — vendored model artifact (coefficients, per-country baselines, evidence)
+- `bundle/model-v4.1.1/` — vendored model artifact (coefficients, per-country baselines, evidence)
   loaded at startup; produced by `clock-of-life-model`.
 
 ## Endpoints
@@ -41,7 +41,12 @@ cargo test
 - `GET /api/questions` — the 24-question interview definition *(public)*
 - `GET /api/ontology` — the model's ontology: each factor's role, the causal graph, and a verified article link. Public.
 - `GET /api/references` — evidence studies (openable DOIs / reviews); `?feature=<key>` or `?rule=<code>` *(public)*
-- `GET /api/locations` — locations with PM2.5 / greenspace *(public)*
+- `GET /api/locations` — every seeded settlement with its PM2.5 / greenspace *(public)*
+- `GET /api/places/{iso3}` — the measured settlements in ONE country, with each reading's year and
+  whether its greenness is its own or its country's, plus the exposure reference the ENV term is
+  centred on. 404 with a reason for a country with no measurement since 2020. ETag-cached *(public)*
+- `GET /api/atlas` — population life expectancy and 15–60 mortality for every country the bundle
+  carries a life table for, derived by the same integrator the Life Clock uses. ETag-cached *(public)*
 - `POST /api/auth/register` — create an account (`email` + `password` ≥ 8); returns a bearer token
 - `POST /api/auth/login` — verify credentials; returns a bearer token
 - `POST /api/estimate` — answers → Life Clock **+ `why[]` (per-factor deltas + references) + `model` provenance**;
@@ -61,12 +66,18 @@ Any non-API path serves the built SPA (`WEB_DIST`, client-side-routing fallback 
 Authenticated requests send `Authorization: Bearer <token>`. Errors are JSON `{"error": "..."}`.
 
 ## Status
-**Full launch-shaped API** over a persist-and-read-back core. Scoring is Cox, country-aware (30 Eurostat
-baselines) with a location ENV term (PM2.5 + greenspace, RES-04); estimates carry a per-factor "Why?"
+**Full launch-shaped API** over a persist-and-read-back core. Scoring is Cox, country-aware — life tables
+for **237 countries** from UN World Population Prospects 2024, of which **30 can be scored** (the rest
+carry a life table so the atlas can draw them and are refused a personal estimate) — with a location ENV
+term centred on **each country's own measured** PM2.5 and greenness; estimates carry a per-factor "Why?"
 breakdown and prioritized recommendations, each linked to openable studies (DOIs / `analysed_papers`
 reviews). Accounts are pseudonymous (argon2, JWT, email one-way-hashed — ADR-002) with per-account
 isolation, GDPR export/erasure/correction, an admin surface with mandatory-citation audit trail, and
 k-anonymized aggregates. Platform: OpenAPI contract, SPA serving, structured JSON errors, request
-tracing, readiness health. **Data caveat:** the Romanian PM2.5/NDVI location values are illustrative
-placeholders (RES-04) pending real sourced layers. **Model residuals (MH-\*)** still gate launch-grade
+tracing, readiness health. **RES-04 is closed:** the seven illustrative Romanian location values are gone,
+deleted by migration `0007` rather than merely dropped from the seed, and replaced by **3,521 measured
+settlements in 85 countries** (WHO Ambient Air Quality Database v8.0, 2020–2025) with greenness from
+Stowell et al. 2023. Two caveats that remain and are stated on screen rather than here: greenness is
+per-city for only 426 of those settlements — the rest show their country's figure, labelled — and **153
+of the 237 countries have no air measurement since 2020**. **Model residuals (MH-\*)** still gate launch-grade
 *numbers* (survey weights, coefficient tuning) — tracked in the model module.
