@@ -92,7 +92,7 @@ def main():
         check("GET /health 200", get("/health")[0] == 200)
 
         s, meta = get("/api/meta")
-        check("GET /api/meta model 4.1.2", meta.get("model_version") == "4.1.2", str(meta.get("model_version")))
+        check("GET /api/meta model 4.2.0", meta.get("model_version") == "4.2.0", str(meta.get("model_version")))
         # Still 30, and that is the point: the bundle now carries 237 life tables so the atlas can
         # draw the world, while /api/meta keeps promising only the countries that can be CENTRED.
         # If this ever reads 237, every non-European user is being scored against a US cohort mean.
@@ -151,7 +151,7 @@ def main():
 
         # 1. Unanswered levers and answers at their centring reference are the same number.
         #    (The bundle's references: standardizer means for diet/sedentary/stress, level "light"
-        #    for alcohol — see bundle/model-v4.1.2/coefficients.json. A bundle change makes this
+        #    for alcohol — see bundle/model-v4.2.0/coefficients.json. A bundle change makes this
         #    FAIL loudly rather than drift.) relative_risk is compared too: it is rounded to 3 dp
         #    against the years' 1 dp, so it catches a centring drift ~6x smaller.
         at_reference = {**plain, "diet_score": 2.5, "sitting_hours": 6.0,
@@ -264,6 +264,20 @@ def main():
         s, profile = get_auth("/api/profile", token)
         check("interview: the home location reads back on the profile",
               bool(s == 200 and profile.get("home_location_id")), str(s))
+
+        old = {"country": "RO", "age": 100, "sex": "M", "smoke": 0, "pa_min": 600,
+               "sleep": 7, "waist": 90}
+        s, hundred = post("/api/estimate", old, None)
+        s2, ten = post("/api/estimate", {**old, "age": 110}, None)
+        check("a 100-year-old is not told half a year",
+              s == 200 and hundred.get("estimate_years", 0) > 1.5,
+              str(hundred.get("estimate_years")))
+        check("nor is a 110-year-old — the questionnaire accepts ages this high",
+              s2 == 200 and ten.get("estimate_years", 0) > 1.5, str(ten.get("estimate_years")))
+        s3, smoker = post("/api/estimate", {**old, "smoke": 2}, None)
+        check("and a relative risk still shortens the open interval",
+              smoker.get("estimate_years", 99) < hundred.get("estimate_years", 0),
+              f"{smoker.get('estimate_years')} vs {hundred.get('estimate_years')}")
 
         s, env = get("/api/atlas/environment")
         check("environment: every measured settlement is drawable",

@@ -41,7 +41,7 @@ async fn state() -> Arc<AppState> {
             if std::env::var("JWT_SECRET").is_err() {
                 std::env::set_var("JWT_SECRET", "integration-test-secret");
             }
-            let s = init_state("bundle/model-v4.1.2", &test_db_url())
+            let s = init_state("bundle/model-v4.2.0", &test_db_url())
                 .await
                 .expect("init_state (is PostgreSQL running and clock_of_life_test present?)");
             sqlx::query("TRUNCATE scenario, calculation, answer RESTART IDENTITY CASCADE")
@@ -265,7 +265,7 @@ fn estimate_why_and_context_not_recommended() {
     let est = body_json(resp).await;
 
     // model provenance block.
-    assert_eq!(est["model"]["version"], "4.1.2");
+    assert_eq!(est["model"]["version"], "4.2.0");
     assert!(est["model"]["algorithm"].as_str().is_some());
     // why[] present, populated, each entry well-formed and sensibly signed.
     let why = est["why"].as_array().expect("why[] present");
@@ -1364,7 +1364,7 @@ fn incompatible_bundle_refused_at_load() {
     // existed only to be refused, so ONT-04 deleted them and the test builds what it needs. Each
     // variant strips exactly one thing the scoring design requires.
     let good: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string("bundle/model-v4.1.2/coefficients.json").unwrap(),
+        &std::fs::read_to_string("bundle/model-v4.2.0/coefficients.json").unwrap(),
     )
     .unwrap();
 
@@ -1410,10 +1410,10 @@ fn incompatible_bundle_refused_at_load() {
 /// cannot explain must be refused.
 #[test]
 fn unsurfaced_lever_refused_at_load() {
-    let coefs = std::fs::read_to_string("bundle/model-v4.1.2/coefficients.json").unwrap();
+    let coefs = std::fs::read_to_string("bundle/model-v4.2.0/coefficients.json").unwrap();
     let good_coefs: serde_json::Value = serde_json::from_str(&coefs).unwrap();
     let good_ont: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string("bundle/model-v4.1.2/ontology.json").unwrap(),
+        &std::fs::read_to_string("bundle/model-v4.2.0/ontology.json").unwrap(),
     )
     .unwrap();
 
@@ -1462,7 +1462,7 @@ fn unsurfaced_lever_refused_at_load() {
 #[test]
 fn literature_gate_refuses_each_malformed_variant() {
     let good: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string("bundle/model-v4.1.2/coefficients.json").unwrap(),
+        &std::fs::read_to_string("bundle/model-v4.2.0/coefficients.json").unwrap(),
     )
     .unwrap();
 
@@ -1554,7 +1554,7 @@ fn literature_levers_surface_everywhere() {
 #[test]
 fn seed_roles_match_the_shipped_ontology() {
     let ont: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string("bundle/model-v4.1.2/ontology.json").unwrap(),
+        &std::fs::read_to_string("bundle/model-v4.2.0/ontology.json").unwrap(),
     )
     .unwrap();
     let feats: Vec<serde_json::Value> = serde_json::from_str(
@@ -1614,7 +1614,7 @@ fn reconciliation_spares_admin_authored_rules() {
     .unwrap();
 
     // Reconcile again, exactly as a restart would.
-    seed::reconcile(&s.pool, &s.bundle.manifest, "bundle/model-v4.1.2", &s.bundle).await.unwrap();
+    seed::reconcile(&s.pool, &s.bundle.manifest, "bundle/model-v4.2.0", &s.bundle).await.unwrap();
 
     let still_active: bool = sqlx::query_scalar("SELECT active FROM recommendation_rule WHERE code = $1")
         .bind(&code)
@@ -1636,7 +1636,7 @@ fn reconciliation_spares_admin_authored_rules() {
     .execute(&s.pool)
     .await
     .unwrap();
-    seed::reconcile(&s.pool, &s.bundle.manifest, "bundle/model-v4.1.2", &s.bundle).await.unwrap();
+    seed::reconcile(&s.pool, &s.bundle.manifest, "bundle/model-v4.2.0", &s.bundle).await.unwrap();
     let active: bool = sqlx::query_scalar("SELECT active FROM recommendation_rule WHERE code = $1")
         .bind(&gone).fetch_one(&s.pool).await.unwrap();
     assert!(!active, "a seed-owned rule missing from the seed must be withdrawn");
@@ -1760,8 +1760,34 @@ fn a_95_year_old_is_not_priced_at_half_a_year() {
         let qx = ro.qx.get("M").expect("male table");
         assert_eq!(qx.keys().filter_map(|a| a.parse::<i64>().ok()).max(), Some(100),
                    "the table must run to 100, not stop at 95");
-        let left = clock_of_life_service::scoring::remaining_le(qx, 95, 1.0);
+        let left = clock_of_life_service::scoring::remaining_le(qx, 95, 1.0, ro.ax("M"));
         assert!(left > 1.5, "a 95-year-old Romanian man had {left} years left");
+
+        // And the same defect at 100, where it MOVED when the source switch fixed it at 95. Every WPP
+        // table closes at 100 with qx = 1.0, so ages 100 through 110 all returned exactly 0.5 — for
+        // every country, both sexes and every risk profile — while validate() accepts ages to 110.
+        // Checking 95 could never catch it, which is why this checks the property at the closeout.
+        let ax = ro.ax("M").expect("the bundle carries the publisher's open-interval expectation");
+        for age in [100, 101, 110] {
+            let left = clock_of_life_service::scoring::remaining_le(qx, age, 1.0, ro.ax("M"));
+            assert!((left - ax).abs() < 1e-9,
+                    "at {age} a Romanian man got {left}, not the published {ax}");
+            assert!(left > 1.5, "at {age} a Romanian man was priced at {left} years");
+        }
+        // Without it, the old number — kept as a live demonstration rather than a claim in a comment.
+        assert!((clock_of_life_service::scoring::remaining_le(qx, 100, 1.0, None) - 0.5).abs() < 1e-9,
+                "without the publisher's ax the closeout is still a flat half year");
+        // A relative risk must shorten the open interval too: ax/rr, the exponential-tail scaling the
+        // interval's own ax assumes. Without the division a sick centenarian reads like a healthy one.
+        assert!(clock_of_life_service::scoring::remaining_le(qx, 100, 2.0, ro.ax("M")) < ax - 0.5);
+
+        // The map is the same arithmetic, so it must move with it.
+        let atlas = body_json(call(&s, get("/api/atlas")).await).await;
+        let rows = atlas["countries"].as_array().unwrap();
+        let flat: Vec<&str> = rows.iter()
+            .filter(|c| c["le0"]["m"].as_f64().is_some_and(|v| v <= 0.6))
+            .map(|c| c["iso3"].as_str().unwrap_or("?")).collect();
+        assert!(flat.is_empty(), "countries still priced at the closeout: {flat:?}");
     });
 }
 
@@ -1772,7 +1798,7 @@ fn a_reference_country_with_no_life_table_is_refused_at_load() {
     let dir = std::env::temp_dir().join(format!("clock-empty-ref-{}", std::process::id()));
     std::fs::create_dir_all(dir.join("baselines")).unwrap();
     for name in ["coefficients.json", "ontology.json", "evidence.json"] {
-        std::fs::copy(format!("bundle/model-v4.1.2/{name}"), dir.join(name)).ok();
+        std::fs::copy(format!("bundle/model-v4.2.0/{name}"), dir.join(name)).ok();
     }
     std::fs::write(
         dir.join("baselines").join("XX.json"),
@@ -1822,13 +1848,13 @@ fn the_map_and_the_clock_are_the_same_number() {
         // the entire claim this endpoint exists to make — and nothing else would notice.
         let base = s.bundle.reference.get("RO").expect("RO reference baseline");
         for sex in ["M", "F"] {
-            let ours = clock_of_life_service::scoring::remaining_le(&base.qx[sex], 40, 1.0);
+            let ours = clock_of_life_service::scoring::remaining_le(&base.qx[sex], 40, 1.0, base.ax(sex));
             let model = s.bundle.baselines["RO"].national_le_40[sex];
             assert!((ours - model).abs() < 0.01,
                     "Rust says {ours} at 40 where the Python model shipped {model} for RO/{sex}");
         }
         // And the served figures are that same function, untransformed.
-        let expect60 = clock_of_life_service::scoring::remaining_le(&base.qx["M"], 60, 1.0);
+        let expect60 = clock_of_life_service::scoring::remaining_le(&base.qx["M"], 60, 1.0, base.ax("M"));
         assert!((ro["le60"]["m"].as_f64().unwrap() - expect60).abs() <= 0.05);
 
         // What the map is NOT. This man is a never-smoker with 600 MET-minutes and no conditions, so
@@ -1946,7 +1972,7 @@ fn illustrative_locations_cannot_survive_a_boot() {
     assert_eq!(after, 0, "every sourceless row is gone");
 
     // And re-seeding does not bring it back — the seed no longer contains it.
-    seed::reconcile(&s.pool, &s.bundle.manifest, "bundle/model-v4.1.2", &s.bundle).await.unwrap();
+    seed::reconcile(&s.pool, &s.bundle.manifest, "bundle/model-v4.2.0", &s.bundle).await.unwrap();
     let revived: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM location WHERE name = 'Atlantis (illustrative)'")
         .fetch_one(&s.pool).await.unwrap();

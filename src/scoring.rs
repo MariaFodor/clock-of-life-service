@@ -247,7 +247,29 @@ pub fn linear_predictor(design: &HashMap<String, f64>, coefs: &HashMap<String, f
 
 /// Remaining life expectancy from `start_age` given a relative-risk multiplier on the baseline hazard.
 /// `qx` maps age (as string) -> yearly probability of death; missing ages are linearly interpolated.
-pub fn remaining_le(qx: &HashMap<String, f64>, start_age: i64, rr: f64) -> f64 {
+/// Remaining life expectancy from `start_age` under a relative-risk multiplier on the baseline hazard.
+///
+/// `ax_last` is the publisher's own expectation for the table's final, OPEN age interval — for a
+/// terminal open interval that IS the remaining life expectancy there, because everyone in it dies in
+/// it. It is `Option` only so a pre-v4.2.0 bundle still scores; the release gates refuse to ship one.
+///
+/// WITHOUT IT THIS IS WRONG AT THE TOP OF THE TABLE. Every WPP table closes at 100 with qx = 1.0, so
+/// the loop below charged the standard half-year for that interval and drove survivorship to zero:
+/// ages 100 THROUGH 110 all returned exactly 0.5, for every country, both sexes and every risk
+/// profile, while `Profile::validate` accepts ages to 110. A Romanian man of 100 has 1.90 years.
+///
+/// `ax_last / rr` rather than `ax_last`: an open interval with constant force of mortality mu has
+/// e = 1/mu, and a proportional hazard multiplies mu by rr, so the expectation scales by 1/rr. Without
+/// the division a sick centenarian would be told the same as a healthy one.
+///
+/// This must stay identical to `clock_model.model.baselines.remaining_le`. The map and the clock are
+/// the same arithmetic over the same table, and that is a property of these two functions agreeing.
+pub fn remaining_le(
+    qx: &HashMap<String, f64>,
+    start_age: i64,
+    rr: f64,
+    ax_last: Option<f64>,
+) -> f64 {
     let mut pts: Vec<(i64, f64)> = qx.iter().filter_map(|(k, v)| k.parse::<i64>().ok().map(|a| (a, *v))).collect();
     pts.sort_by_key(|p| p.0);
     let (lo, hi) = (pts[0].0, pts[pts.len() - 1].0);
@@ -270,6 +292,12 @@ pub fn remaining_le(qx: &HashMap<String, f64>, start_age: i64, rr: f64) -> f64 {
     for age in start_age..=110 {
         let q = q_at(age);
         let qa = 1.0 - (1.0 - q).powf(rr);
+        if qa >= 1.0 {
+            // The open terminal interval: nobody leaves it alive, so what remains is the time lived
+            // inside it. Returning makes that explicit — today it only works because `s` becomes 0,
+            // which is an accident this used to rely on.
+            return le + s * ax_last.map_or(0.5, |ax| ax / rr);
+        }
         le += s * (1.0 - qa / 2.0);
         s *= 1.0 - qa;
     }
@@ -353,7 +381,7 @@ pub fn estimate(bundle: &Bundle, p: &Profile) -> Result<Estimate, String> {
     let (rr, base) = risk(bundle, p)?;
     let qx = base.qx.get(&p.sex).ok_or_else(|| format!("no qx for sex {}", p.sex))?;
 
-    let years = remaining_le(qx, p.age.round() as i64, rr);
+    let years = remaining_le(qx, p.age.round() as i64, rr, base.ax(&p.sex));
     let rel = if p.age >= 55.0 { 0.06 } else { 0.10 }; // interval widens for the young (sparse deaths) — heuristic v1
     Ok(Estimate {
         estimate_years: round1(years),
@@ -457,7 +485,7 @@ pub fn attributions(bundle: &Bundle, p: &Profile) -> Result<Vec<Attribution>, St
     let (base_rr, base) = risk(bundle, p)?;
     let qx = base.qx.get(&p.sex).ok_or_else(|| format!("no qx for sex {}", p.sex))?;
     let age = p.age.round() as i64;
-    let years_actual = remaining_le(qx, age, base_rr);
+    let years_actual = remaining_le(qx, age, base_rr, base.ax(&p.sex));
     let d0 = design(p, &bundle.coefficients);
     let attr = &bundle.coefficients.attribution;
 
@@ -480,7 +508,7 @@ pub fn attributions(bundle: &Bundle, p: &Profile) -> Result<Vec<Attribution>, St
         };
         let d_lp = c * x;
         let rr_without = base_rr * (-d_lp).exp(); // remove this factor's contribution
-        let years_without = remaining_le(qx, age, rr_without);
+        let years_without = remaining_le(qx, age, rr_without, base.ax(&p.sex));
         let delta = years_actual - years_without;
         if delta.abs() < 0.05 {
             continue; // negligible — don't clutter the Why? list
@@ -506,7 +534,7 @@ pub fn attributions(bundle: &Bundle, p: &Profile) -> Result<Vec<Attribution>, St
             continue; // answered exactly at the reference — nothing to explain
         }
         let rr_without = base_rr * (-d_lp).exp();
-        let years_without = remaining_le(qx, age, rr_without);
+        let years_without = remaining_le(qx, age, rr_without, base.ax(&p.sex));
         let delta = years_actual - years_without;
         if delta.abs() < 0.05 {
             continue;
@@ -601,7 +629,7 @@ pub fn whatif(bundle: &Bundle, base: &Profile, changes: &WhatIfChanges) -> Resul
     let (base_rr, baseline) = risk(bundle, base)?;
     let qx = baseline.qx.get(&base.sex).ok_or_else(|| format!("no qx for sex {}", base.sex))?;
     let age = base.age.round() as i64;
-    let current_years = remaining_le(qx, age, base_rr);
+    let current_years = remaining_le(qx, age, base_rr, baseline.ax(&base.sex));
 
     let mut modified = base.clone();
     let mut note = None;
@@ -700,7 +728,7 @@ pub fn whatif(bundle: &Bundle, base: &Profile, changes: &WhatIfChanges) -> Resul
         + literature_lp(&modified, &bundle.coefficients)
         - literature_lp(base, &bundle.coefficients);
     let scenario_rr = base_rr * d_lp.exp();
-    let scenario_years = remaining_le(qx, age, scenario_rr);
+    let scenario_years = remaining_le(qx, age, scenario_rr, baseline.ax(&base.sex));
 
     Ok(WhatIf {
         current_years: round1(current_years),
@@ -769,7 +797,7 @@ mod tests {
     use std::path::Path;
 
     fn bundle() -> Bundle {
-        Bundle::load(Path::new("bundle/model-v4.1.2")).expect("bundle loads")
+        Bundle::load(Path::new("bundle/model-v4.2.0")).expect("bundle loads")
     }
 
     #[test]
@@ -877,7 +905,7 @@ mod tests {
         let b = bundle();
         let ro = &b.baselines["RO"];
         for sex in ["M", "F"] {
-            let le = remaining_le(&ro.qx[sex], 40, 1.0);
+            let le = remaining_le(&ro.qx[sex], 40, 1.0, ro.ax(sex));
             let national = ro.national_le_40[sex];
             assert!((le - national).abs() < 0.1, "{sex}: {le} vs national {national}");
         }
