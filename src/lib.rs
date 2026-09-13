@@ -966,26 +966,32 @@ async fn relocate_route(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let round1 = |x: f64| (x * 10.0).round() / 10.0;
 
-    // The cross-border case, refused in words rather than answered wrongly.
+    // MOVING COUNTRY CHANGES THE LIFE TABLE, NOT ONLY THE AIR — so this does both.
     //
-    // `req.country` and `req.base.country` are separate fields, and nothing checked that they agreed.
-    // Moving to a city in another country therefore looked up the DESTINATION's exposures and scored
-    // them against the ORIGIN's life table and the ORIGIN's exposure reference — exposure arithmetic
-    // wearing a national-mortality label. A German city's 8 µg/m³ was priced as a deviation from
-    // Romania's 10.4 and then applied to Romanian death rates, which is not any country's answer.
-    //
-    // Refusing is the honest move here rather than re-basing: a real cross-border answer has to change
-    // the life table too, and most destinations are not scoreable at all (30 of 237), so the feature
-    // would silently work for some borders and not others.
+    // It used to refuse the cross-border case outright, and before that it answered it wrongly: the
+    // destination's exposures were priced against the ORIGIN's reference and applied to the ORIGIN's
+    // death rates, which is not any country's answer. Refusal was the honest stop-gap. Doing it
+    // properly means re-basing the whole estimate on the destination — its qx table, its reference
+    // population, and its own exposure reference — which is exactly what `estimate()` already does
+    // when `Profile.country` changes, and then SPLITTING the result so a reader can see which half of
+    // the difference is the country and which is the address.
     let alias = |c: &String| s.bundle.manifest.country_aliases.get(c).unwrap_or(c).clone();
-    if alias(&req.country) != alias(&req.base.country) {
+    let origin = alias(&req.base.country);
+    let destination = alias(&req.country);
+    let moving_country = origin != destination;
+
+    // The one case that still cannot be answered: a destination the model cannot score at all. 207 of
+    // the 237 countries have a life table but no reference population, so a personal number there would
+    // be centred on a US cohort mean. Refused by name rather than by silence.
+    if moving_country && !s.bundle.baselines.contains_key(&destination) {
         return Err((
             StatusCode::BAD_REQUEST,
             format!(
-                "this compares places inside one country. Your profile says {} and you asked about a \
-                 place in {} — moving between countries changes the national death rates the estimate \
-                 is built on, not just the air, and this cannot yet account for that.",
-                req.base.country, req.country
+                "this app cannot work out a personal estimate for someone living in {} yet — the \
+                 calculation needs that country's own smoking and weight figures to know what an \
+                 average person there looks like, and it only has those for 30 countries. The World \
+                 tab can still show you how long people live there.",
+                req.country
             ),
         )
             .into());
@@ -996,60 +1002,95 @@ async fn relocate_route(
         .map_err(db_err)?
         .ok_or((StatusCode::NOT_FOUND, format!("unknown location: {} ({})", req.to, req.country)))?;
 
-    // Baseline profile: optionally take env from a named `from` location.
+    // Baseline profile: optionally take env from a named `from` location. `from` is resolved in the
+    // ORIGIN country, which is the reader's own — it is where they live now, not where they are going.
     let mut base = req.base.clone();
     let from_json = if let Some(fname) = &req.from {
-        let f = db::location_by_name(&s.pool, fname, &req.country)
+        let f = db::location_by_name(&s.pool, fname, &req.base.country)
             .await
             .map_err(db_err)?
-            .ok_or((StatusCode::NOT_FOUND, format!("unknown location: {} ({})", fname, req.country)))?;
+            .ok_or((StatusCode::NOT_FOUND,
+                    format!("unknown location: {} ({})", fname, req.base.country)))?;
         base.pm25 = f.pm25;
         base.ndvi = f.ndvi;
-        json!({"name": f.name, "pm25": f.pm25, "ndvi": f.ndvi})
+        json!({"name": f.name, "country": req.base.country, "pm25": f.pm25, "ndvi": f.ndvi})
     } else {
         serde_json::Value::Null
     };
 
     let bad = |e: String| (StatusCode::BAD_REQUEST, e);
     let current = estimate(&s.bundle, &base).map_err(bad)?.estimate_years;
-    // Full move (both air + green change).
+    // The full move: the country's own life table and reference population, AND the address's air and
+    // greenness. Setting `country` is what re-bases the first two — `risk()` resolves the baseline from
+    // it and centres the relative risk on that country's average person.
     let mut moved = base.clone();
+    moved.country = req.country.clone();
     moved.pm25 = to.pm25;
     moved.ndvi = to.ndvi;
     let relocated = estimate(&s.bundle, &moved).map_err(bad)?.estimate_years;
+
+    // The split a reader needs, and it is exact rather than apportioned: the two parts sum to the
+    // whole by construction.
+    //
+    //   national   the same person with NO address in either country, so the environment term is zero
+    //              on both sides and what remains is the life table and the reference population.
+    //   address    everything else — which is the air and greenness of the two places, each priced
+    //              against its OWN country's average.
+    //
+    // Taking "no address" as the pivot matters. Holding the ORIGIN's exposure fixed and only swapping
+    // the country would price a Romanian city's air against Germany's average, which is a number about
+    // nowhere.
+    let national_delta = if moving_country {
+        let mut here = base.clone();
+        here.pm25 = None;
+        here.ndvi = None;
+        let mut there = here.clone();
+        there.country = req.country.clone();
+        Some(estimate(&s.bundle, &there).map_err(bad)?.estimate_years
+            - estimate(&s.bundle, &here).map_err(bad)?.estimate_years)
+    } else {
+        None
+    };
     // Isolate each driver: change only air, then only greenspace.
-    let mut air = base.clone();
-    air.pm25 = to.pm25;
-    let air_years = estimate(&s.bundle, &air).map_err(bad)?.estimate_years;
-    let mut green = base.clone();
-    green.ndvi = to.ndvi;
-    let green_years = estimate(&s.bundle, &green).map_err(bad)?.estimate_years;
+    //
+    // Only meaningful WITHIN one country. Across a border each side's exposure is priced against its
+    // own country's average, so "change only the air" would hold a Romanian greenness figure against
+    // Germany's reference — a number about nowhere, which is the exact mistake the old cross-border
+    // path made with the whole estimate. For a move abroad the split that IS exact is national versus
+    // address, and that is what gets reported.
+    let (air_years, green_years) = if moving_country {
+        (current, current)
+    } else {
+        let mut air = base.clone();
+        air.pm25 = to.pm25;
+        let mut green = base.clone();
+        green.ndvi = to.ndvi;
+        (
+            estimate(&s.bundle, &air).map_err(bad)?.estimate_years,
+            estimate(&s.bundle, &green).map_err(bad)?.estimate_years,
+        )
+    };
 
     // What could not be priced, and why — so the breakdown can say "no layer" instead of "+0.0 years".
     //
     // `0.0` was the answer to both "this makes no difference here" and "nobody has measured greenness in
     // your country", and a reader cannot tell those apart. 3,067 of the 3,522 settlements carry their
     // country's greenness rather than their own, and 29 carry none at all.
-    let reference = s
-        .bundle
-        .manifest
-        .country_aliases
-        .get(&req.base.country)
-        .unwrap_or(&req.base.country)
-        .clone();
-    let env_ref = s.bundle.baselines.get(&reference).and_then(|b| b.env_reference.as_ref());
+    // The DESTINATION's reference, because the destination is where the place is. It used to read the
+    // origin's, which was harmless while both were the same country and wrong the moment they were not.
+    let env_ref = s.bundle.baselines.get(&destination).and_then(|b| b.env_reference.as_ref());
     let (_, refused) = scoring::env_term_with_reason(to.pm25, to.ndvi, env_ref);
     let unpriced = |key: &str| {
         refused
             .iter()
             .any(|(k, r)| *k == key && *r == scoring::EnvRefused::NoReference)
     };
-    let air_delta = if unpriced("pm25") {
+    let air_delta = if unpriced("pm25") || moving_country {
         serde_json::Value::Null
     } else {
         json!(round1(air_years - current))
     };
-    let green_delta = if unpriced("ndvi") {
+    let green_delta = if unpriced("ndvi") || moving_country {
         serde_json::Value::Null
     } else {
         json!(round1(green_years - current))
@@ -1065,10 +1106,20 @@ async fn relocate_route(
             "pm25_year": to.pm25_year, "ndvi_year": to.ndvi_year,
         },
         "reference": env_ref,
+        // Named on both sides, so a client never has to infer that this was a move abroad.
+        "moving_country": moving_country,
+        "from_country": req.base.country,
+        "to_country": req.country,
         "current_years": current,
         "relocated_years": relocated,
         "delta_years": round1(relocated - current),
         "breakdown": {
+            // The two halves of a move abroad, and they sum to `delta_years` by construction rather
+            // than by apportionment. `national` is the same person with no address in either country —
+            // the life table and the reference population alone. `address` is everything else: the two
+            // places' air and greenness, each priced against its own country's average.
+            "national_delta_years": national_delta.map(round1),
+            "address_delta_years": national_delta.map(|n| round1((relocated - current) - n)),
             "air_delta_years": air_delta,
             "greenspace_delta_years": green_delta,
             // Present only when something was refused, so a client cannot render an empty reason.
@@ -1077,13 +1128,21 @@ async fn relocate_route(
                     .filter(|(_, r)| *r == scoring::EnvRefused::NoReference)
                     .map(|(k, _)| json!({
                         "component": k,
-                        "reason": format!("no measured {k} reference for {reference} — a change \
+                        "reason": format!("no measured {k} reference for {destination} — a change \
                                            cannot be priced against an average nobody has measured"),
                     }))
                     .collect::<Vec<_>>())
             } else { serde_json::Value::Null },
         },
-        "note": "statistical scenario; location exposure is ecological (assigned by area, not measured) — medium confidence, not a promise",
+        "note": if moving_country {
+            "statistical scenario. Most of a move abroad is the country's own death rates, not \
+             anything about you — and it assumes everything else about you travels unchanged, which \
+             a real move does not: income, diet, work and the health service all move with you and \
+             none of that is in this number."
+        } else {
+            "statistical scenario; location exposure is ecological (assigned by area, not measured) \
+             — medium confidence, not a promise"
+        },
     })))
 }
 
