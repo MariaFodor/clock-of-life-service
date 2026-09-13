@@ -1167,14 +1167,44 @@ fn relocate_compares_locations() {
         call(&s, post("/api/relocate", json!({"base": base, "to": "Atlantis"}))).await.status(),
         StatusCode::NOT_FOUND);
 
-    // A cross-border move is REFUSED in words, not answered with the origin's life table. This was
-    // silently wrong: the destination's exposures were scored against the origin's death rates and the
-    // origin's exposure reference, which is not any country's answer.
+    // A cross-border move is ANSWERED now, and answered by re-basing the whole estimate on the
+    // destination — its life table, its reference population, its exposure reference. It used to be
+    // refused, and before that answered wrongly: the destination's air priced against the origin's
+    // average and applied to the origin's death rates, which is not any country's answer.
     let cross = call(&s, post("/api/relocate",
         json!({"base": base, "country": "DE", "to": "Berlin"}))).await;
-    assert_eq!(cross.status(), StatusCode::BAD_REQUEST, "cross-border relocate is refused");
-    let msg = body_json(cross).await["error"].as_str().unwrap().to_string();
-    assert!(msg.contains("national death rates"), "the refusal says WHY: {msg}");
+    assert_eq!(cross.status(), StatusCode::OK, "a move abroad is answered");
+    let x = body_json(cross).await;
+    assert_eq!(x["moving_country"], true);
+    assert_eq!(x["from_country"], "RO");
+    assert_eq!(x["to_country"], "DE");
+
+    // The split is EXACT, not apportioned: the two halves sum to the whole.
+    let total = x["delta_years"].as_f64().unwrap();
+    let national = x["breakdown"]["national_delta_years"].as_f64().unwrap();
+    let address = x["breakdown"]["address_delta_years"].as_f64().unwrap();
+    assert!((national + address - total).abs() < 0.11,
+            "national {national} + address {address} should make {total}");
+    // Germany outlives Romania by years, and that is the country's death rates rather than Berlin's
+    // air — so the national half must carry most of a move that size.
+    assert!(national > 1.0, "moving RO->DE should add years from the life table alone: {national}");
+    assert!(total > 0.0, "and the move as a whole should add years: {total}");
+
+    // Air and greenness are NOT split across a border: each side's exposure is priced against its own
+    // country's average, so "change only the air" would hold a Romanian greenness figure against
+    // Germany's reference — a number about nowhere.
+    assert!(x["breakdown"]["air_delta_years"].is_null(), "no air/green split across a border");
+    assert!(x["breakdown"]["greenspace_delta_years"].is_null());
+    assert!(x["note"].as_str().unwrap().contains("travel unchanged")
+            || x["note"].as_str().unwrap().contains("travels unchanged"),
+            "the note names the assumption: {}", x["note"]);
+
+    // A destination the model cannot SCORE is still refused, by name. 207 of 237 countries have a life
+    // table and no reference population; a personal number there would be centred on a US cohort mean.
+    let unscoreable = call(&s, post("/api/relocate",
+        json!({"base": base, "country": "NG", "to": "Lagos"}))).await;
+    assert_eq!(unscoreable.status(), StatusCode::BAD_REQUEST);
+    assert!(body_json(unscoreable).await["error"].as_str().unwrap().contains("cannot work out a personal estimate"));
     });
 }
 
