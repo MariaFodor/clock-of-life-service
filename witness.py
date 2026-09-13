@@ -304,11 +304,27 @@ def main():
         s, body = get("/api/places/TCD")
         check("places: a country with no measurement since 2020 is a 404 with a reason, not an empty list",
               s == 404 and "since 2020" in str(body.get("reason", "")), str(s))
-        s, body = post("/api/relocate", {"base": {"country": "RO", "age": 45, "sex": "M", "smoke": 0,
-                                                  "pa_min": 600, "sleep": 7, "waist": 90},
-                                         "country": "DE", "to": "Berlin"}, None)
-        check("relocate: a cross-border move is refused in words, not answered with the wrong life table",
-              s == 400 and "national death rates" in str(body.get("error", "")), str(s))
+        mover = {"country": "RO", "age": 45, "sex": "M", "smoke": 0,
+                 "pa_min": 600, "sleep": 7, "waist": 90}
+        s, body = post("/api/relocate", {"base": mover, "country": "DE", "to": "Berlin"}, None)
+        # This used to assert the REFUSAL. A cross-border move is answered now, by re-basing the whole
+        # estimate on the destination — its life table, its average person, its exposure reference.
+        b = body.get("breakdown") or {}
+        check("relocate: a move abroad is answered, and re-based on the destination",
+              s == 200 and body.get("moving_country") is True, str(s))
+        check("relocate: the two halves sum to the whole, rather than being apportioned",
+              s == 200 and abs((b.get("national_delta_years") or 0)
+                               + (b.get("address_delta_years") or 0)
+                               - (body.get("delta_years") or 0)) < 0.11,
+              f"{b.get('national_delta_years')} + {b.get('address_delta_years')} "
+              f"vs {body.get('delta_years')}")
+        check("relocate: the country's own death rates carry most of a RO->DE move",
+              (b.get("national_delta_years") or 0) > 1.0, str(b.get("national_delta_years")))
+        check("relocate: air and greenness are NOT split across a border",
+              b.get("air_delta_years") is None and b.get("greenspace_delta_years") is None)
+        s, ng = post("/api/relocate", {"base": mover, "country": "NG", "to": "Lagos"}, None)
+        check("relocate: a destination the model cannot score is still refused, by name",
+              s == 400 and "cannot work out a personal estimate" in str(ng.get("error", "")), str(s))
 
         # Probe hygiene: erase the account we created, so runs don't accrete *accounts*. (The
         # unauthenticated estimates above still persist calculation rows to the shared anonymous
