@@ -31,7 +31,7 @@ cargo test
   loader), `db.rs` (pool, migrations, queries), `seed.rs` (startup reconciliation), `main.rs` (binary).
 - `migrations/` — SQLx migrations (the full 11-table schema).
 - `seeds/` — desired-state `feature` and `question` reference data seeded on startup.
-- `bundle/model-v4.1.1/` — vendored model artifact (coefficients, per-country baselines, evidence)
+- `bundle/model-v4.1.2/` — vendored model artifact (coefficients, per-country baselines, evidence)
   loaded at startup; produced by `clock-of-life-model`.
 
 ## Endpoints
@@ -75,7 +75,7 @@ reviews). Accounts are pseudonymous (argon2, JWT, email one-way-hashed — ADR-0
 isolation, GDPR export/erasure/correction, an admin surface with mandatory-citation audit trail, and
 k-anonymized aggregates. Platform: OpenAPI contract, SPA serving, structured JSON errors, request
 tracing, readiness health. **RES-04 is closed:** the seven illustrative Romanian location values are gone,
-deleted by migration `0007` rather than merely dropped from the seed, and replaced by **3,521 measured
+deleted by migration `0007` rather than merely dropped from the seed, and replaced by **3,515 measured
 settlements in 85 countries** (WHO Ambient Air Quality Database v8.0, 2020–2025) with greenness from
 Stowell et al. 2023. Two caveats that remain and are stated on screen rather than here: greenness is
 per-city for only 426 of those settlements — the rest show their country's figure, labelled — and **152

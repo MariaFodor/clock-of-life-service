@@ -1,5 +1,5 @@
 {
-  "version": "4.1.1",
+  "version": "4.1.2",
   "algorithm": "cox_ph",
   "reference_population": "per-country (UN World Population Prospects 2024)",
   "training_cohort": "NHANES 2007-2014 + NCHS Linked Mortality",
@@ -406,8 +406,8 @@
       "api_url": "https://ghoapi.azureedge.net/api/SDGPM25",
       "licence": "CC BY-NC-SA 3.0 IGO",
       "licence_url": "https://creativecommons.org/licenses/by-nc-sa/3.0/igo/",
-      "retrieved": "2026-09-10",
-      "sha256": "e07cf1d9977563a09210d5ab34b2467e052b1f477e59ad46659518a3cfa81a89",
+      "retrieved": "2026-09-13",
+      "sha256": "8a5bbfeab15fff9cbaec9f610935f686de732285b0944659c36583354ff258fa",
       "countries": 227,
       "verified": true
     },
@@ -418,13 +418,13 @@
       "file_url": "https://cdn.who.int/media/docs/default-source/air-pollution-documents/air-quality-and-health/who-ambient-air-quality-database-version-2026-v8.xlsx?sfvrsn=95d122a4_5&download=true",
       "licence": "CC BY-NC-SA 3.0 IGO",
       "licence_url": "https://creativecommons.org/licenses/by-nc-sa/3.0/igo/",
-      "retrieved": "2026-09-10",
+      "retrieved": "2026-09-13",
       "sha256": "d4f128df1b4649bc7fe9e03ee32cabb00abc24725de9a1c22398966035e38bbe",
       "window": [
         2020,
         2025
       ],
-      "settlements": 3521,
+      "settlements": 3515,
       "countries": 85,
       "verified": true
     },
@@ -437,7 +437,7 @@
       "file_url": "https://dataverse.harvard.edu/api/access/datafile/6903364",
       "licence": "CC0 1.0",
       "licence_url": "https://creativecommons.org/publicdomain/zero/1.0/",
-      "retrieved": "2026-09-10",
+      "retrieved": "2026-09-13",
       "sha256": "a3656a7212bbd2a1c92f6745977c5f26befc95c8e782f3f1c9dfbe8c735484e9",
       "measure": "population-weighted annual mean NDVI",
       "cities": 1038,
@@ -478,15 +478,15 @@
     }
   ],
   "places": {
-    "count": 3521,
+    "count": 3515,
     "countries": 85,
     "with_city_greenness": 426,
-    "with_country_greenness": 3066,
+    "with_country_greenness": 3060,
     "without_greenness": 29
   },
   "checksums": {
-    "places.json": "980af230e1020c96",
-    "model-card.md": "30f93ba4d0bc892f",
+    "places.json": "ea59ed8f5e80ad53",
+    "model-card.md": "993cf84c183f4d2e",
     "ontology.json": "a6512ed86e5b0928",
     "coefficients.json": "f376bcfea7f21c5a",
     "evidence.json": "f2fb09324d6b1b28",

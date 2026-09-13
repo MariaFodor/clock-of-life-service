@@ -41,7 +41,7 @@ async fn state() -> Arc<AppState> {
             if std::env::var("JWT_SECRET").is_err() {
                 std::env::set_var("JWT_SECRET", "integration-test-secret");
             }
-            let s = init_state("bundle/model-v4.1.1", &test_db_url())
+            let s = init_state("bundle/model-v4.1.2", &test_db_url())
                 .await
                 .expect("init_state (is PostgreSQL running and clock_of_life_test present?)");
             sqlx::query("TRUNCATE scenario, calculation, answer RESTART IDENTITY CASCADE")
@@ -265,7 +265,7 @@ fn estimate_why_and_context_not_recommended() {
     let est = body_json(resp).await;
 
     // model provenance block.
-    assert_eq!(est["model"]["version"], "4.1.1");
+    assert_eq!(est["model"]["version"], "4.1.2");
     assert!(est["model"]["algorithm"].as_str().is_some());
     // why[] present, populated, each entry well-formed and sensibly signed.
     let why = est["why"].as_array().expect("why[] present");
@@ -1184,7 +1184,7 @@ fn locations_and_home_location() {
     RT.block_on(async {
     let s = state().await;
     let locs = body_json(call(&s, get("/api/locations")).await).await;
-    // 3,521 real settlements, not seven invented ones. The floor is deliberately far above the old
+    // 3,515 real settlements, not seven invented ones. The floor is deliberately far above the old
     // seven so a regression to a hand-written seed fails here rather than looking plausible.
     assert!(locs.as_array().unwrap().len() > 3000,
             "real settlements seeded and public, got {}", locs.as_array().unwrap().len());
@@ -1364,7 +1364,7 @@ fn incompatible_bundle_refused_at_load() {
     // existed only to be refused, so ONT-04 deleted them and the test builds what it needs. Each
     // variant strips exactly one thing the scoring design requires.
     let good: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string("bundle/model-v4.1.1/coefficients.json").unwrap(),
+        &std::fs::read_to_string("bundle/model-v4.1.2/coefficients.json").unwrap(),
     )
     .unwrap();
 
@@ -1410,10 +1410,10 @@ fn incompatible_bundle_refused_at_load() {
 /// cannot explain must be refused.
 #[test]
 fn unsurfaced_lever_refused_at_load() {
-    let coefs = std::fs::read_to_string("bundle/model-v4.1.1/coefficients.json").unwrap();
+    let coefs = std::fs::read_to_string("bundle/model-v4.1.2/coefficients.json").unwrap();
     let good_coefs: serde_json::Value = serde_json::from_str(&coefs).unwrap();
     let good_ont: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string("bundle/model-v4.1.1/ontology.json").unwrap(),
+        &std::fs::read_to_string("bundle/model-v4.1.2/ontology.json").unwrap(),
     )
     .unwrap();
 
@@ -1462,7 +1462,7 @@ fn unsurfaced_lever_refused_at_load() {
 #[test]
 fn literature_gate_refuses_each_malformed_variant() {
     let good: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string("bundle/model-v4.1.1/coefficients.json").unwrap(),
+        &std::fs::read_to_string("bundle/model-v4.1.2/coefficients.json").unwrap(),
     )
     .unwrap();
 
@@ -1554,7 +1554,7 @@ fn literature_levers_surface_everywhere() {
 #[test]
 fn seed_roles_match_the_shipped_ontology() {
     let ont: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string("bundle/model-v4.1.1/ontology.json").unwrap(),
+        &std::fs::read_to_string("bundle/model-v4.1.2/ontology.json").unwrap(),
     )
     .unwrap();
     let feats: Vec<serde_json::Value> = serde_json::from_str(
@@ -1614,7 +1614,7 @@ fn reconciliation_spares_admin_authored_rules() {
     .unwrap();
 
     // Reconcile again, exactly as a restart would.
-    seed::reconcile(&s.pool, &s.bundle.manifest, "bundle/model-v4.1.1", &s.bundle).await.unwrap();
+    seed::reconcile(&s.pool, &s.bundle.manifest, "bundle/model-v4.1.2", &s.bundle).await.unwrap();
 
     let still_active: bool = sqlx::query_scalar("SELECT active FROM recommendation_rule WHERE code = $1")
         .bind(&code)
@@ -1636,7 +1636,7 @@ fn reconciliation_spares_admin_authored_rules() {
     .execute(&s.pool)
     .await
     .unwrap();
-    seed::reconcile(&s.pool, &s.bundle.manifest, "bundle/model-v4.1.1", &s.bundle).await.unwrap();
+    seed::reconcile(&s.pool, &s.bundle.manifest, "bundle/model-v4.1.2", &s.bundle).await.unwrap();
     let active: bool = sqlx::query_scalar("SELECT active FROM recommendation_rule WHERE code = $1")
         .bind(&gone).fetch_one(&s.pool).await.unwrap();
     assert!(!active, "a seed-owned rule missing from the seed must be withdrawn");
@@ -1772,7 +1772,7 @@ fn a_reference_country_with_no_life_table_is_refused_at_load() {
     let dir = std::env::temp_dir().join(format!("clock-empty-ref-{}", std::process::id()));
     std::fs::create_dir_all(dir.join("baselines")).unwrap();
     for name in ["coefficients.json", "ontology.json", "evidence.json"] {
-        std::fs::copy(format!("bundle/model-v4.1.1/{name}"), dir.join(name)).ok();
+        std::fs::copy(format!("bundle/model-v4.1.2/{name}"), dir.join(name)).ok();
     }
     std::fs::write(
         dir.join("baselines").join("XX.json"),
@@ -1946,7 +1946,7 @@ fn illustrative_locations_cannot_survive_a_boot() {
     assert_eq!(after, 0, "every sourceless row is gone");
 
     // And re-seeding does not bring it back — the seed no longer contains it.
-    seed::reconcile(&s.pool, &s.bundle.manifest, "bundle/model-v4.1.1", &s.bundle).await.unwrap();
+    seed::reconcile(&s.pool, &s.bundle.manifest, "bundle/model-v4.1.2", &s.bundle).await.unwrap();
     let revived: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM location WHERE name = 'Atlantis (illustrative)'")
         .fetch_one(&s.pool).await.unwrap();
@@ -2034,7 +2034,7 @@ fn environment_layer_says_where_there_is_no_measurement() {
     let r = body_json(resp).await;
 
     let points = r["points"].as_array().unwrap();
-    assert_eq!(points.len(), 3521, "every measured settlement is drawable");
+    assert_eq!(points.len(), 3515, "every measured settlement is drawable");
     assert!(points.iter().all(|p| {
         let lat = p["lat"].as_f64().unwrap();
         let lon = p["lon"].as_f64().unwrap();

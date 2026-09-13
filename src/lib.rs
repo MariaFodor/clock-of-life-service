@@ -435,7 +435,7 @@ async fn atlas_route(State(s): State<Arc<AppState>>, headers: HeaderMap) -> Resp
 
 /// Every measured settlement as a drawable point, for the map's air layer.
 ///
-/// Separate from `/api/atlas` and loaded only when a reader switches the layer on: 3,521 coordinate
+/// Separate from `/api/atlas` and loaded only when a reader switches the layer on: 3,515 coordinate
 /// pairs are an order of magnitude more bytes than the whole country table, and most readers never ask
 /// for them. Kept to the fields a dot and its hover need, which is why there is no greenness here — a
 /// value that is usually the COUNTRY's figure cannot be drawn as a property of a point, and the country
