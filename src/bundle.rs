@@ -149,6 +149,13 @@ pub struct Baseline {
     pub qx: HashMap<String, HashMap<String, f64>>,
     pub reference_lp: RefLp,
     pub national_le_40: HashMap<String, f64>,
+    /// The publisher's own expectation for the table's final OPEN age interval, per sex.
+    ///
+    /// `remaining_le` prices that interval at a flat half-year without it, so every reader aged 100 to
+    /// 110 was told 0.5 years. WPP publishes it; `None` only for a pre-v4.2.0 bundle.
+    #[serde(default)]
+    pub ax_last: Option<HashMap<String, f64>>,
+
     /// Absent for a country WHO has never measured. The scoring path must then refuse to price the
     /// environment rather than price it against somebody else's country.
     pub env_reference: Option<EnvReference>,
@@ -174,6 +181,26 @@ pub struct ReferenceBaseline {
     /// Carried on the reference set too, so the atlas can draw exposure for the 85 countries that have
     /// it without the map having to reach into the scoreable 30.
     pub env_reference: Option<EnvReference>,
+    /// The publisher's own expectation for the table's final OPEN age interval, per sex.
+    ///
+    /// `remaining_le` prices that interval at a flat half-year without it, so every reader aged 100 to
+    /// 110 was told 0.5 years. WPP publishes it; `None` only for a pre-v4.2.0 bundle.
+    #[serde(default)]
+    pub ax_last: Option<HashMap<String, f64>>,
+
+}
+
+impl Baseline {
+    /// This sex's open-interval expectation, or `None` for a pre-v4.2.0 bundle.
+    pub fn ax(&self, sex: &str) -> Option<f64> {
+        self.ax_last.as_ref().and_then(|m| m.get(sex).copied())
+    }
+}
+
+impl ReferenceBaseline {
+    pub fn ax(&self, sex: &str) -> Option<f64> {
+        self.ax_last.as_ref().and_then(|m| m.get(sex).copied())
+    }
 }
 
 #[derive(Deserialize)]

@@ -335,10 +335,13 @@ fn build_atlas(b: &Bundle) -> serde_json::Value {
         .reference
         .values()
         .map(|r| {
-            let by_sex = |f: &dyn Fn(&HashMap<String, f64>) -> f64| {
+            // The closure takes the SEX as well as the table, because the open-interval expectation
+            // is per sex — Romania's are 1.90 for men and 1.49 for women, and passing one for both
+            // would put a man's tail on a woman's map.
+            let by_sex = |f: &dyn Fn(&HashMap<String, f64>, &str) -> f64| {
                 let mut out = serde_json::Map::new();
                 for (sex, qx) in &r.qx {
-                    out.insert(sex.to_lowercase(), json!(round1(f(qx))));
+                    out.insert(sex.to_lowercase(), json!(round1(f(qx, sex))));
                 }
                 serde_json::Value::Object(out)
             };
@@ -349,9 +352,9 @@ fn build_atlas(b: &Bundle) -> serde_json::Value {
                 "region": r.region,
                 "lifetable_year": r.lifetable_year,
                 "scoreable": b.baselines.contains_key(&r.country),
-                "le0": by_sex(&|qx| scoring::remaining_le(qx, 0, 1.0)),
-                "le60": by_sex(&|qx| scoring::remaining_le(qx, 60, 1.0)),
-                "am": by_sex(&scoring::adult_mortality_15_60),
+                "le0": by_sex(&|qx, sex| scoring::remaining_le(qx, 0, 1.0, r.ax(sex))),
+                "le60": by_sex(&|qx, sex| scoring::remaining_le(qx, 60, 1.0, r.ax(sex))),
+                "am": by_sex(&|qx, _sex| scoring::adult_mortality_15_60(qx)),
                 // The environment SUMMARY, not the readings. `settlements: 0` is the honest statement
                 // the map needs and is deliberately not the same as a missing key: 0 means "nobody has
                 // published a PM2.5 measurement for any settlement here since 2020", which is a fact
