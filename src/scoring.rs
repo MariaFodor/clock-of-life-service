@@ -769,7 +769,7 @@ mod tests {
     use std::path::Path;
 
     fn bundle() -> Bundle {
-        Bundle::load(Path::new("bundle/model-v4.1.1")).expect("bundle loads")
+        Bundle::load(Path::new("bundle/model-v4.1.2")).expect("bundle loads")
     }
 
     #[test]

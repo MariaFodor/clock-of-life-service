@@ -1,4 +1,4 @@
-# Model card — The Clock of Life v4.1.1
+# Model card — The Clock of Life v4.1.2
 
 **Algorithm:** Cox proportional hazards (interpretable), lifestyle + pathology predictors; age & sex to
 the national life-table baseline. **Attribution/What-If** uses a separate total-effect model.
@@ -35,7 +35,7 @@ rural / city / town), so a reader in a village is not centred on a capital-city 
 population-weighted annual mean NDVI from Stowell et al. 2023 (CC0), derived from that country's own
 measured cities, with `ndvi_cities` recording how many — 22 of the 30 scoreable countries rest on ONE
 city, and the figure must be labelled as that rather than presented as a measurement of the country.
-`places.json` carries 3,521 real settlements in 85 countries, each with its own
+`places.json` carries 3,515 real settlements in 85 countries, each with its own
 PM2.5 reading and `ndvi_basis` saying whether its greenness is its own or its country's.
 
 **Inherited licence:** WHO's air data is CC BY-NC-SA 3.0 IGO — non-commercial and SHARE-ALIKE, and that
