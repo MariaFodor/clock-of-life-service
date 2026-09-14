@@ -126,13 +126,23 @@ def main():
         # risk ratio is centred on the country's real average person, while the benchmark's "average"
         # was assembled in the web client out of healthy answers and scored at 0.58x. A reader below
         # average risk was told she had fewer years left than average.
-        for label, prof, e in (("healthy", ro, e_healthy), ("high-risk", hi, e_high)):
+        # >= / <= rather than > / <: both figures are rounded to one decimal, so a risk ratio near 1.0
+        # makes them equal. Rounding cannot invert the comparison, only flatten it.
+        for label, e in (("healthy", e_healthy), ("high-risk", e_high)):
             avg = e.get("national_avg_years")
             yrs, rr = e.get("estimate_years"), e.get("relative_risk")
             agrees = avg is not None and rr is not None and yrs is not None and (
-                (rr < 1.0 and yrs > avg) or (rr > 1.0 and yrs < avg) or rr == 1.0)
+                (rr < 1.0 and yrs >= avg) or (rr > 1.0 and yrs <= avg) or rr == 1.0)
             check(f"estimate: {label} years agree with the risk ratio's direction",
                   agrees, f"rr {rr} | {yrs}y vs average {avg}y")
+
+        # The country whose reference person the bundle itself calls invented gets no comparison.
+        ch = {"country": "CH", "age": 40, "sex": "M", "smoke": 0, "pa_min": 600, "sleep": 7,
+              "waist": 94, "income": 3.0}
+        _, e_ch = post("/api/estimate", ch)
+        check("estimate: a country with no measured prevalence is served no national average",
+              e_ch.get("estimate_years", 0) > 0 and e_ch.get("national_avg_years", "x") is None,
+              f'{e_ch.get("estimate_years")}y, average {e_ch.get("national_avg_years")}')
 
         smoker = {"country": "RO", "age": 45, "sex": "M", "smoke": 2, "pa_min": 100, "sleep": 7,
                   "waist": 108, "income": 2.0}

@@ -159,6 +159,27 @@ pub struct Baseline {
     /// Absent for a country WHO has never measured. The scoring path must then refuse to price the
     /// environment rather than price it against somebody else's country.
     pub env_reference: Option<EnvReference>,
+
+    /// National smoking / overweight rates — what makes `reference_lp` describe an average person
+    /// HERE rather than an average of somebody else.
+    ///
+    /// `None` for Switzerland, the one scoreable country without them, and the bundle says so in
+    /// `prevalence_source`: "reference person is a non-smoker of cohort-average weight, not this
+    /// country's average person; relative risk here is overstated" — the model measures the
+    /// overstatement at x1.125. The service could not see that field at all until it needed to decide
+    /// whether serving a national average would be honest, which is why it is deserialized now.
+    #[serde(default)]
+    pub prevalence: Option<HashMap<String, f64>>,
+    #[serde(default)]
+    pub prevalence_source: Option<String>,
+}
+
+impl Baseline {
+    /// True when `reference_lp` was built from THIS country's own measured prevalence, so a figure
+    /// centred on it can be presented to a reader as their country's average.
+    pub fn reference_is_measured(&self) -> bool {
+        self.prevalence.is_some()
+    }
 }
 
 /// A country the atlas may DRAW but the clock may not score.

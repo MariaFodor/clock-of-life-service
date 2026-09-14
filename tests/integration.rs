@@ -254,12 +254,16 @@ fn estimate_persists_and_history_reads_back() {
 }
 
 /// The benchmark contradiction: a reader below average risk must never be told she has fewer years
-/// left than the average person. The served average is now rr = 1.0 over the same life table, so the
-/// two figures on the Life Clock are arithmetically unable to point in opposite directions.
+/// left than the average person. The served average is rr = 1.0 over the same life table, so the two
+/// figures on the Life Clock cannot point in opposite directions.
 ///
 /// Reported by the owner from the live app: a Cypriot woman of 32 at 0.60x risk read "40% lower" and
 /// "0.2 years below the average person" on one screen. The average being compared against was a
-/// hardcoded healthy person the model scores at 0.58x, built in the web client.
+/// hardcoded healthy profile the model scores around 0.58x, built in the web client.
+///
+/// Asserted with >= / <= rather than > / <: both served figures are rounded to one decimal, and a
+/// relative risk close enough to 1.0 makes them equal. Rounding is monotone, so it can collapse the
+/// difference but never invert it — which is the property worth pinning.
 #[test]
 fn served_average_agrees_with_the_risk_ratio() {
     RT.block_on(async {
@@ -277,15 +281,24 @@ fn served_average_agrees_with_the_risk_ratio() {
         assert_eq!(resp.status(), StatusCode::OK);
         let e = body_json(resp).await;
         let years = e["estimate_years"].as_f64().expect("estimate_years");
-        let avg = e["national_avg_years"].as_f64().expect("national_avg_years is served");
+        let avg = e["national_avg_years"].as_f64().expect("a measured country serves an average");
         let rr = e["relative_risk"].as_f64().expect("relative_risk");
         assert!(avg > 0.0, "the average is a real figure, not a placeholder: {avg}");
         if rr < 1.0 {
-            assert!(years > avg, "rr {rr} below average must mean more years: {years} vs {avg}");
+            assert!(years >= avg, "rr {rr} below average must not mean fewer years: {years} vs {avg}");
         } else if rr > 1.0 {
-            assert!(years < avg, "rr {rr} above average must mean fewer years: {years} vs {avg}");
+            assert!(years <= avg, "rr {rr} above average must not mean more years: {years} vs {avg}");
         }
     }
+
+    // Switzerland ships no prevalence, so its reference person is not a Swiss average and the bundle
+    // says so. The estimate is still served; the comparison is withheld rather than invented.
+    let resp = call(&s, post("/api/estimate", profile("CH", 40, "M", 0, 600, 94))).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let ch = body_json(resp).await;
+    assert!(ch["estimate_years"].as_f64().unwrap() > 0.0, "CH is still scoreable");
+    assert!(ch["national_avg_years"].is_null(),
+            "CH must not be handed an average its own artifact calls mis-centred");
     });
 }
 
@@ -1923,10 +1936,19 @@ fn the_map_and_the_clock_are_the_same_number() {
         let expect60 = clock_of_life_service::scoring::remaining_le(&base.qx["M"], 60, 1.0, base.ax("M"));
         assert!((ro["le60"]["m"].as_f64().unwrap() - expect60).abs() <= 0.05);
 
-        // What the map is NOT. This man is a never-smoker with 600 MET-minutes and no conditions, so
+        // What THE MAP is NOT. This man is a never-smoker with 600 MET-minutes and no conditions, so
         // his relative risk is below the Romanian average and he beats the population figure — by
-        // design, and by a margin the reader must never be invited to subtract. It is asserted here so
-        // that the difference stays a deliberate property rather than a surprise.
+        // design. It is asserted here so that the difference stays a deliberate property rather than
+        // a surprise.
+        //
+        // This once read "a margin the reader must never be invited to subtract", which is no longer
+        // the whole truth and is worth recording rather than quietly deleting. The Life Clock DOES
+        // now invite exactly that subtraction, as `national_avg_years` — the same number as
+        // `le60.m` — and the owner asked for it after reading a benchmark that contradicted the risk
+        // line. The distinction that survives: on the clock the comparison is named, sexed, and sits
+        // beside the risk ratio it agrees with; on the MAP the figure is a country shown in a
+        // geographic context with no framing, where subtracting your own estimate from it is still
+        // an invitation the page must not issue. Hence `AtlasPage.tsx`'s "and no arithmetic".
         let healthy = json!({"country": "RO", "age": 60, "sex": "M", "smoke": 0, "pa_min": 600,
                              "sleep": 7.5, "waist": 94, "diabetes": false, "high_bp": false});
         let est = body_json(call(&s, post("/api/estimate", healthy)).await).await;
