@@ -297,8 +297,10 @@ fn served_average_agrees_with_the_risk_ratio() {
     assert_eq!(resp.status(), StatusCode::OK);
     let ch = body_json(resp).await;
     assert!(ch["estimate_years"].as_f64().unwrap() > 0.0, "CH is still scoreable");
-    assert!(ch["national_avg_years"].is_null(),
-            "CH must not be handed an average its own artifact calls mis-centred");
+    // `is_null()` is also true for an ABSENT key, so it would pass if the field were dropped
+    // entirely. The contract is that it is SERVED as null, which is what a client distinguishes.
+    assert_eq!(ch.get("national_avg_years"), Some(&Value::Null),
+               "CH must be served an explicit null, not a missing field");
     });
 }
 

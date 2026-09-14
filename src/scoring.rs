@@ -174,9 +174,11 @@ pub struct Estimate {
     /// while `relative_risk` is NOT. `design()` emits no sex term and `RefLp` has no sex dimension,
     /// because the model centres on Eurostat's sex-pooled (`sex=T`) prevalence. So rr = 1.0 names a
     /// sex-pooled composite, not the average man or the average woman. Measured: RO age 40, identical
-    /// answers, M and F both score rr 0.531 against averages of 34.0 and 40.6. Each 10 points of
-    /// male-female gap in smoking prevalence moves the true sex-specific reference by about 0.5 years,
-    /// in OPPOSITE directions for the two sexes. The two figures agree in direction; they are not
+    /// answers, M and F both score rr 0.531 against averages of 34.0 and 40.6. Ten points of
+    /// male-female gap in smoking prevalence pull the two true references about half a year APART at
+    /// age 40 (measured RO: -0.30 y for men, +0.24 y for women) — not half a year each, and much less
+    /// above 55, where the `smk_current_x_young` interaction drops out. Romania's real gap is about
+    /// 19 points, which puts a genuinely average Romanian man near rr 1.05. The two figures agree in direction; they are not
     /// centred on the same person, and closing that needs a sex-stratified refit, not a serving change.
     ///
     /// `None` where the country's `reference_lp` was NOT built from its own measured prevalence —
@@ -954,7 +956,7 @@ mod tests {
         //
         // Asserted TWICE, on purpose. The strict inequality holds on the raw integrator; the SERVED
         // figures are both rounded to one decimal, and rounding can collapse a real difference to
-        // equality — measured, rr in [0.9918, 1.0032] at RO/F/40 ties. Rounding is monotone so it can
+        // equality — measured, rr in [0.99171, 1.00322] at RO/F/40 ties. Rounding is monotone so it can
         // never FLIP the sign, which is why the served assertion is >= rather than >. Asserting > on
         // the served values would be a test that fails for a profile the product answers correctly.
         let b = bundle();
@@ -1034,7 +1036,12 @@ mod tests {
         assert!(e.national_avg_years.is_none(), "CH must not be given a national average");
         assert!(e.estimate_years > 0.0, "but the estimate itself is still served");
 
-        // Every other scoreable country does get one, so this is a guard and not an outage.
+        // And it is a guard, not an outage: every OTHER scoreable country carries prevalence and is
+        // served an average. Checked across all of them rather than asserted about one.
+        for (iso, base) in &b.baselines {
+            let served = base.reference_is_measured();
+            assert_eq!(served, iso != "CH", "{iso}: exactly one scoreable country lacks prevalence");
+        }
         let ro = estimate(&b, &Profile { country: "RO".into(), ..prof }).unwrap();
         assert!(ro.national_avg_years.is_some(), "RO has measured prevalence and must serve it");
     }
