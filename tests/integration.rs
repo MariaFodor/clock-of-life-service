@@ -253,6 +253,42 @@ fn estimate_persists_and_history_reads_back() {
     });
 }
 
+/// The benchmark contradiction: a reader below average risk must never be told she has fewer years
+/// left than the average person. The served average is now rr = 1.0 over the same life table, so the
+/// two figures on the Life Clock are arithmetically unable to point in opposite directions.
+///
+/// Reported by the owner from the live app: a Cypriot woman of 32 at 0.60x risk read "40% lower" and
+/// "0.2 years below the average person" on one screen. The average being compared against was a
+/// hardcoded healthy person the model scores at 0.58x, built in the web client.
+#[test]
+fn served_average_agrees_with_the_risk_ratio() {
+    RT.block_on(async {
+    let s = state().await;
+    let profile = |country: &str, age: i64, sex: &str, smoke: i64, pa: i64, waist: i64| json!({
+        "country": country, "age": age, "sex": sex, "smoke": smoke, "pa_min": pa, "sleep": 7,
+        "waist": waist, "bmi": 25.5, "cigs_day": 0, "income": 2.5, "diabetes": false,
+        "high_bp": false, "respiratory": false, "cvd_hx": false, "cancer_hx": false,
+        "higher_educ": false
+    });
+
+    // The owner's own case, and a high-risk one for the other direction.
+    for p in [profile("CY", 32, "F", 0, 600, 84), profile("RO", 55, "M", 2, 0, 115)] {
+        let resp = call(&s, post("/api/estimate", p.clone())).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let e = body_json(resp).await;
+        let years = e["estimate_years"].as_f64().expect("estimate_years");
+        let avg = e["national_avg_years"].as_f64().expect("national_avg_years is served");
+        let rr = e["relative_risk"].as_f64().expect("relative_risk");
+        assert!(avg > 0.0, "the average is a real figure, not a placeholder: {avg}");
+        if rr < 1.0 {
+            assert!(years > avg, "rr {rr} below average must mean more years: {years} vs {avg}");
+        } else if rr > 1.0 {
+            assert!(years < avg, "rr {rr} above average must mean fewer years: {years} vs {avg}");
+        }
+    }
+    });
+}
+
 /// API-05: /api/estimate carries a why[] breakdown + model provenance; context factors are never
 /// turned into recommendations.
 #[test]

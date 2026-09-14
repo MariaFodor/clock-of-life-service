@@ -159,6 +159,18 @@ pub struct Estimate {
     pub interval: [f64; 2],
     pub reaches_age: f64,
     pub relative_risk: f64,
+    /// The same country, sex and age at EXACTLY average risk — `remaining_le` with rr = 1.0.
+    ///
+    /// This is the reference `relative_risk` is already relative to, which is the whole point of
+    /// serving it here rather than letting a caller assemble its own. The web client used to build a
+    /// hardcoded "average person" (never smoked, 600 MET-min/week, BMI 25.5, no conditions) and score
+    /// it through this same endpoint — a person this model rates at **0.58x**. So one screen compared
+    /// a reader against a healthy invention while calling it "average", directly beneath a risk figure
+    /// centred on the country's real prevalence-weighted population. A Cypriot woman of 32 at 0.60x was
+    /// told she was 0.2 years BELOW average when she is 4.2 above it, sign included.
+    ///
+    /// Both numbers now come from one call over one life table, so they cannot disagree again.
+    pub national_avg_years: f64,
     pub country: String,
 }
 
@@ -381,10 +393,14 @@ pub fn estimate(bundle: &Bundle, p: &Profile) -> Result<Estimate, String> {
     let (rr, base) = risk(bundle, p)?;
     let qx = base.qx.get(&p.sex).ok_or_else(|| format!("no qx for sex {}", p.sex))?;
 
-    let years = remaining_le(qx, p.age.round() as i64, rr, base.ax(&p.sex));
+    let age = p.age.round() as i64;
+    let years = remaining_le(qx, age, rr, base.ax(&p.sex));
+    // The average person of this age and sex here: the same table, the same integrator, rr = 1.0.
+    let avg = remaining_le(qx, age, 1.0, base.ax(&p.sex));
     let rel = if p.age >= 55.0 { 0.06 } else { 0.10 }; // interval widens for the young (sparse deaths) — heuristic v1
     Ok(Estimate {
         estimate_years: round1(years),
+        national_avg_years: round1(avg),
         interval: [round1(years * (1.0 - rel)), round1(years * (1.0 + rel))],
         reaches_age: round1(p.age + years),
         relative_risk: (rr * 1000.0).round() / 1000.0,
@@ -908,6 +924,59 @@ mod tests {
             let le = remaining_le(&ro.qx[sex], 40, 1.0, ro.ax(sex));
             let national = ro.national_le_40[sex];
             assert!((le - national).abs() < 0.1, "{sex}: {le} vs national {national}");
+        }
+    }
+
+    #[test]
+    fn served_average_never_contradicts_the_risk_ratio() {
+        // The defect this pins: the two figures on the Life Clock disagreed about direction. A reader
+        // below average risk was told she had fewer years left than "the average person", because the
+        // page's average was a hardcoded healthy person scored at 0.58x rather than rr = 1.0.
+        //
+        // Now they come from one call, so the invariant is checkable: whichever side of 1.0 the risk
+        // ratio falls on, the years must fall on the matching side of the national average.
+        let b = bundle();
+        let p = |smoke, pa, waist, diab| Profile {
+            country: "RO".into(), age: 40.0, sex: "F".into(), smoke, pa_min: pa, sleep: 7.0,
+            waist, bmi: Some(27.0), cigs_day: 0.0, sbp: None, diabetes: diab, high_bp: diab,
+            respiratory: false, cvd_hx: false, cancer_hx: false, higher_educ: true, income: 4.0,
+            pm25: None, ndvi: None, diet_score: None, alcohol: None, sitting_hours: None,
+            stress_score: None, mobility: None,
+        };
+        for prof in [p(0, 2000.0, 85.0, false), p(2, 0.0, 115.0, true), p(1, 600.0, 95.0, false)] {
+            let e = estimate(&b, &prof).unwrap();
+            if e.relative_risk < 1.0 {
+                assert!(e.estimate_years > e.national_avg_years,
+                        "rr {} is below average, so {} years must exceed the average {}",
+                        e.relative_risk, e.estimate_years, e.national_avg_years);
+            } else if e.relative_risk > 1.0 {
+                assert!(e.estimate_years < e.national_avg_years,
+                        "rr {} is above average, so {} years must fall short of the average {}",
+                        e.relative_risk, e.estimate_years, e.national_avg_years);
+            }
+        }
+    }
+
+    #[test]
+    fn the_served_average_is_the_life_table_itself() {
+        // rr = 1.0 is not "a healthy person" — it is the national figure. Same integrator, same table,
+        // so the served average must reproduce what the bundle stored for the country.
+        let b = bundle();
+        let ro = &b.baselines["RO"];
+        for sex in ["M", "F"] {
+            let prof = Profile {
+                country: "RO".into(), age: 40.0, sex: sex.into(), smoke: 0, pa_min: 600.0,
+                sleep: 7.0, waist: 90.0, bmi: Some(25.0), cigs_day: 0.0, sbp: None,
+                diabetes: false, high_bp: false, respiratory: false, cvd_hx: false,
+                cancer_hx: false, higher_educ: false, income: 3.0, pm25: None, ndvi: None,
+                diet_score: None, alcohol: None, sitting_hours: None, stress_score: None,
+                mobility: None,
+            };
+            let e = estimate(&b, &prof).unwrap();
+            let national = ro.national_le_40[sex];
+            assert!((e.national_avg_years - national).abs() < 0.1,
+                    "{sex}: served average {} vs the bundle's own national figure {national}",
+                    e.national_avg_years);
         }
     }
 
