@@ -25,6 +25,46 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), sqlx::migrate::MigrateE
     MIGRATOR.run(pool).await
 }
 
+/// Find an account by ANY of several lookup keys, returning which one matched.
+///
+/// One round trip whatever the outcome. Querying the peppered key and then falling back to the
+/// legacy one made a hit faster than a miss, and this route is deliberately built so that the two
+/// are indistinguishable — the dummy argon2 verify on the miss path exists for exactly that reason.
+///
+/// `ORDER BY array_position` because `= ANY` does NOT honour the array's order: Postgres sorts the
+/// values and walks the index in ITS order, so a bare `LIMIT 1` returns whichever digest the btree
+/// reaches first. With two rows matching — a rotation deployed without EMAIL_PEPPER_PREVIOUS leaves
+/// exactly that — a returning user would land in whichever of the two split accounts the hash values
+/// happened to favour, rather than the current one.
+pub async fn find_account_by_any_email_hash(
+    pool: &PgPool,
+    hashes: &[String],
+) -> Result<Option<(Uuid, String, String)>, sqlx::Error> {
+    sqlx::query_as::<_, (Uuid, String, String)>(
+        "SELECT id, password_hash, email_hash FROM account
+         WHERE email_hash = ANY($1)
+         ORDER BY array_position($1, email_hash)
+         LIMIT 1",
+    )
+    .bind(hashes)
+    .fetch_optional(pool)
+    .await
+}
+
+/// Rewrite an account's lookup key — the lazy half of the email-pepper migration.
+///
+/// There is no backfill: the peppered key is HMAC over the raw email, and the raw email is never
+/// stored (ADR-002). So a legacy row can only be recognised by its old key, at a moment when the
+/// person has just supplied the email — i.e. a verified login — and rewritten then.
+pub async fn update_email_hash(pool: &PgPool, account_id: Uuid, email_hash: &str) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE account SET email_hash = $1 WHERE id = $2")
+        .bind(email_hash)
+        .bind(account_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 /// True if the error is a unique-constraint violation (e.g. duplicate email_hash) → map to 409.
 pub fn is_unique_violation(e: &sqlx::Error) -> bool {
     matches!(e, sqlx::Error::Database(db) if db.is_unique_violation())

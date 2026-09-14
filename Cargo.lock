@@ -219,6 +219,7 @@ dependencies = [
  "argon2",
  "axum",
  "chrono",
+ "hmac",
  "jsonwebtoken",
  "serde",
  "serde_json",
