@@ -72,137 +72,187 @@ use scoring::{
 };
 use sqlx::postgres::PgPool;
 
-/// A fixed-window attempt counter for the unauthenticated auth routes.
+/// The two controls on the unauthenticated auth routes. They guard different things and the first
+/// version of this conflated them, with the result that the "protection" was a better attack than
+/// the problem.
 ///
-/// Two things needed bounding, and they are not the same thing:
+/// THAT VERSION, recorded so it does not come back: a global counter of 600 attempts per minute,
+/// meant to bound the cost of argon2. A single counter with no per-source dimension is a shared-fate
+/// control — anyone who fills it with invented addresses makes login AND register return 429 to
+/// EVERY user for the rest of the window, and because refused requests are rejected before hashing,
+/// holding that outage costs the attacker nothing. It also grew one map entry per address seen,
+/// uncapped (the per-key entry was created before the global check could refuse it), while sweeping
+/// the whole map under one mutex on every call: measured 20,001 live entries against a cap of 600,
+/// and a 104x slowdown at 20k. A counter was simply the wrong instrument for cost.
 ///
-///   - **guessing one account's password.** Keyed by the account's lookup hash, so an attacker
-///     hammering one address is stopped without affecting anyone else.
-///   - **the cost of being asked.** `verify_password` is argon2id — deliberately expensive, which is
-///     correct against guessing and makes an unauthenticated POST an efficient way to burn the
-///     server's CPU and memory. A global bucket bounds that, and it is checked BEFORE any hashing.
+///   FAILURES, per account — `Guessing`. Brute force is the threat, so only FAILED attempts count.
+///   Someone who types their own password correctly is never refused, which also removes the
+///   targeted lockout the counting-everything version had: the key is derived from attacker-supplied
+///   input, so ten requests a minute against a known address used to deny that person their own
+///   account.
 ///
-/// Keyed by hash rather than by client IP deliberately. The right key for the second case is the
-/// caller's address, but this service is served over plain HTTP with no trusted proxy in front, so
-/// the only address available is either the socket (the proxy's, once there is one) or a header the
-/// caller sets themselves. Trusting a spoofable header would be worse than this. When a terminator
-/// with a trusted `X-Forwarded-For` exists, that becomes the better key for the global bucket.
-pub struct RateLimit {
-    pub max_attempts: u32,
-    pub max_global: u32,
+///   COST — `Hashing`. argon2id is deliberately expensive, which is right against guessing and makes
+///   an unauthenticated POST an efficient way to burn CPU and memory. The fix for cost is to bound
+///   CONCURRENCY, not to count: a semaphore lets the work queue instead of refusing, caps it at a
+///   known number of cores, and cannot be weaponised by volume because filling it denies nobody —
+///   it only makes everyone wait their turn.
+///
+/// Keyed by lookup hash rather than client IP deliberately: this service is served over plain HTTP
+/// with no trusted proxy, so the only address available is the socket's or a header the caller sets
+/// themselves, and trusting a spoofable header would be worse. With a terminator in front, a trusted
+/// `X-Forwarded-For` would be the better key.
+pub struct Guessing {
+    pub max_failures: u32,
     pub window: std::time::Duration,
     buckets: std::sync::Mutex<HashMap<String, (std::time::Instant, u32)>>,
 }
 
-impl Default for RateLimit {
+impl Default for Guessing {
     fn default() -> Self {
         Self {
-            // Per account: brute force is the threat, and ten guesses a minute against one address
-            // is far below any attack rate and far above any real person's fumbling.
-            max_attempts: 10,
-            // Global: this bounds COST, not guessing, so it is set where it cannot refuse legitimate
-            // traffic — 10/s caps argon2id at roughly half a core, against unbounded today.
-            max_global: 600,
+            // Ten WRONG passwords a minute against one address: far below any attack rate, far above
+            // a real person's fumbling, and harmless to someone who knows their password.
+            max_failures: 10,
             window: std::time::Duration::from_secs(60),
             buckets: std::sync::Mutex::new(HashMap::new()),
         }
     }
 }
 
-impl RateLimit {
-    /// `Ok(())` if this attempt is allowed; `Err(seconds)` to wait if it is not.
+impl Guessing {
+    /// `Ok(())` to let this attempt proceed; `Err(seconds)` to refuse it.
     pub fn check(&self, key: &str) -> Result<(), u64> {
         let now = std::time::Instant::now();
-        // A poisoned lock must not take the service down, and must not silently allow: treat it as
-        // the counter being unavailable and let the attempt through, which is the pre-existing
-        // behaviour rather than a new failure mode.
-        let Ok(mut buckets) = self.buckets.lock() else { return Ok(()) };
-
-        // Drop windows that have closed, so a long-running process does not accumulate one entry per
-        // address ever seen. Cheap at this size and bounded by the number of live windows.
+        // A poisoned lock must not take auth down. `into_inner` keeps the counts we have rather than
+        // discarding them, which is what `unwrap_or(Ok(()))` used to do — nothing here can panic
+        // while holding it, but recovering is strictly better than allowing.
+        let mut buckets = self
+            .buckets
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         buckets.retain(|_, (started, _)| now.duration_since(*started) < self.window);
+        match buckets.get(key) {
+            Some((started, n)) if *n >= self.max_failures => {
+                Err(self.window.saturating_sub(now.duration_since(*started)).as_secs() + 1)
+            }
+            _ => Ok(()),
+        }
+    }
 
-        for (k, limit) in [(key, self.max_attempts), ("*", self.max_global)] {
-            let entry = buckets.entry(k.to_string()).or_insert((now, 0));
-            if now.duration_since(entry.0) >= self.window {
-                *entry = (now, 0);
-            }
-            if entry.1 >= limit {
-                return Err(self.window.saturating_sub(now.duration_since(entry.0)).as_secs() + 1);
-            }
+    /// Record one failed attempt. Only failures are counted, so success never fills the bucket.
+    pub fn record_failure(&self, key: &str) {
+        let now = std::time::Instant::now();
+        let Ok(mut buckets) = self.buckets.lock().or_else(|e| Ok::<_, ()>(e.into_inner())) else {
+            return;
+        };
+        // Bounded by the number of addresses that actually FAILED inside one window, and nothing
+        // creates an entry without a failure — so volume from invented addresses cannot grow it
+        // unless each one also costs the attacker a full argon2 verify.
+        buckets.retain(|_, (started, _)| now.duration_since(*started) < self.window);
+        let e = buckets.entry(key.to_string()).or_insert((now, 0));
+        if now.duration_since(e.0) >= self.window {
+            *e = (now, 0);
         }
-        // Counted only once both checks passed, so a request refused by the global bucket does not
-        // also consume the per-account allowance.
-        for k in [key, "*"] {
-            if let Some(e) = buckets.get_mut(k) {
-                e.1 += 1;
-            }
+        e.1 += 1;
+    }
+
+    /// Clear an address's failures after a correct password, so one bad run does not linger.
+    pub fn forget(&self, key: &str) {
+        if let Ok(mut b) = self.buckets.lock().or_else(|e| Ok::<_, ()>(e.into_inner())) {
+            b.remove(key);
         }
-        Ok(())
     }
 }
 
 #[cfg(test)]
-mod rate_limit_tests {
-    use super::RateLimit;
+mod guessing_tests {
+    use super::Guessing;
     use std::time::Duration;
 
-    fn limiter(per_key: u32, global: u32, window_ms: u64) -> RateLimit {
-        RateLimit {
-            max_attempts: per_key,
-            max_global: global,
+    fn g(max: u32, window_ms: u64) -> Guessing {
+        Guessing {
+            max_failures: max,
             window: Duration::from_millis(window_ms),
             buckets: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 
     #[test]
-    fn stops_guessing_one_account_without_touching_another() {
-        let rl = limiter(3, 1000, 60_000);
-        for i in 0..3 {
-            assert!(rl.check("victim").is_ok(), "attempt {i} should be allowed");
+    fn only_failures_count() {
+        // The version this replaced counted every attempt, so a person who knew their own password
+        // could be locked out of their own account by somebody else's guessing.
+        let gg = g(3, 60_000);
+        for _ in 0..10 {
+            assert!(gg.check("victim").is_ok(), "successes must never fill the bucket");
         }
-        assert!(rl.check("victim").is_err(), "the fourth guess is refused");
-        assert!(rl.check("someone-else").is_ok(), "a different account is unaffected");
+        for _ in 0..3 {
+            assert!(gg.check("victim").is_ok());
+            gg.record_failure("victim");
+        }
+        assert!(gg.check("victim").is_err(), "three failures is the limit");
     }
 
     #[test]
-    fn bounds_total_cost_across_all_accounts() {
-        // The DoS case: every request a different address, so no per-key bucket ever fills.
-        let rl = limiter(10, 3, 60_000);
-        for i in 0..3 {
-            assert!(rl.check(&format!("addr-{i}")).is_ok());
+    fn a_correct_password_clears_the_record() {
+        let gg = g(3, 60_000);
+        gg.record_failure("me");
+        gg.record_failure("me");
+        gg.forget("me");
+        for _ in 0..3 {
+            assert!(gg.check("me").is_ok());
+            gg.record_failure("me");
         }
-        assert!(rl.check("addr-fresh").is_err(), "the global bucket refuses a brand-new key");
+        assert!(gg.check("me").is_err(), "and the count restarts from there");
     }
 
     #[test]
-    fn a_refusal_does_not_consume_the_accounts_allowance() {
-        // Otherwise an attacker could exhaust everyone's per-account budget by flooding the global
-        // one — locking out every user without guessing a single password.
-        let rl = limiter(2, 1, 60_000);
-        assert!(rl.check("victim").is_ok());          // uses global 1/1 and victim 1/2
-        assert!(rl.check("victim").is_err());         // refused globally
-        let rl2 = limiter(2, 100, 60_000);
-        assert!(rl2.check("victim").is_ok());
-        assert!(rl2.check("victim").is_ok());
-        assert!(rl2.check("victim").is_err(), "per-key limit still applies on its own");
+    fn one_account_cannot_refuse_another() {
+        let gg = g(2, 60_000);
+        for _ in 0..50 {
+            gg.record_failure("victim");
+        }
+        assert!(gg.check("victim").is_err());
+        assert!(gg.check("someone-else").is_ok(), "no shared bucket, so no shared fate");
+    }
+
+    #[test]
+    fn volume_from_invented_addresses_refuses_nobody() {
+        // The defect in the version this replaces: a global counter meant 600 requests under made-up
+        // addresses locked EVERY real user out for the rest of the window, and refusals were rejected
+        // before hashing so holding that outage was free. There is no global bucket now.
+        let gg = g(10, 60_000);
+        for i in 0..5_000 {
+            gg.record_failure(&format!("invented-{i}"));
+        }
+        assert!(gg.check("a-real-person").is_ok(), "a first-time caller is unaffected by volume");
+    }
+
+    #[test]
+    fn entries_exist_only_for_addresses_that_actually_failed() {
+        // Each entry now costs the attacker a full argon2 verify, so the map cannot be grown cheaply.
+        let gg = g(10, 60_000);
+        for i in 0..100 {
+            let _ = gg.check(&format!("k{i}"));
+        }
+        assert_eq!(gg.buckets.lock().unwrap().len(), 0, "checking alone creates nothing");
+        gg.record_failure("k0");
+        assert_eq!(gg.buckets.lock().unwrap().len(), 1);
     }
 
     #[test]
     fn the_window_reopens() {
-        let rl = limiter(1, 1000, 30);
-        assert!(rl.check("k").is_ok());
-        assert!(rl.check("k").is_err());
+        let gg = g(1, 30);
+        gg.record_failure("k");
+        assert!(gg.check("k").is_err());
         std::thread::sleep(Duration::from_millis(45));
-        assert!(rl.check("k").is_ok(), "a closed window must not lock the account out forever");
+        assert!(gg.check("k").is_ok(), "a closed window must not lock an account out forever");
     }
 
     #[test]
     fn refusal_reports_a_wait_the_caller_can_act_on() {
-        let rl = limiter(1, 1000, 60_000);
-        assert!(rl.check("k").is_ok());
-        let secs = rl.check("k").expect_err("refused");
+        let gg = g(1, 60_000);
+        gg.record_failure("k");
+        let secs = gg.check("k").expect_err("refused");
         assert!((1..=61).contains(&secs), "retry-after should be within the window: {secs}");
     }
 }
@@ -219,8 +269,13 @@ pub struct AppState {
     /// Server-side pepper for the email lookup key (HMAC-SHA256). Never stored in the database —
     /// that is the whole point: a dumped `account` table has nothing to grind against.
     pub email_pepper: Vec<u8>,
-    /// Brute-force / DoS guard on the two unauthenticated auth routes. `None` disables it.
-    pub auth_rate_limit: Option<RateLimit>,
+    /// The pepper in use before the current one, while a rotation is in flight.
+    pub email_pepper_previous: Option<Vec<u8>>,
+    /// Failed-password counter for the two unauthenticated auth routes. `None` disables it.
+    pub auth_guessing: Option<Guessing>,
+    /// Bounds how many password hashes run at once, so the cost of being asked is capped by cores
+    /// rather than by refusing callers.
+    pub hashing: Arc<tokio::sync::Semaphore>,
     /// Bearer-token lifetime in seconds.
     pub token_ttl_secs: i64,
     /// Directory of the built SPA to serve (client-side routing falls back to its index.html).
@@ -284,7 +339,14 @@ pub fn jwt_secret() -> Result<Vec<u8>, String> {
 /// migration this introduced, run again.
 pub fn email_pepper() -> Result<Vec<u8>, String> {
     match std::env::var("EMAIL_PEPPER") {
-        Ok(s) if !s.is_empty() => Ok(s.into_bytes()),
+        // A pepper shorter than the digest it keys is a pepper an attacker can search. `jwt_secret`
+        // has the same weakness and the same floor is worth applying there eventually.
+        Ok(s) if s.len() >= 32 => Ok(s.into_bytes()),
+        Ok(s) if !s.is_empty() => Err(format!(
+            "EMAIL_PEPPER is {} bytes — refusing to start. It keys an HMAC over a low-entropy input; \
+             use at least 32 bytes of random data.",
+            s.len()
+        )),
         _ => {
             if std::env::var("CLOCK_DEV_INSECURE_JWT").as_deref() == Ok("1") {
                 eprintln!(
@@ -299,6 +361,20 @@ pub fn email_pepper() -> Result<Vec<u8>, String> {
             }
         }
     }
+}
+
+/// The pepper this deployment used BEFORE the current one, if it is mid-rotation.
+///
+/// Without this, rotating `EMAIL_PEPPER` locks every existing account out — the key is HMAC over the
+/// raw email and the raw email is never stored, so no row can be recomputed. The README described a
+/// rotation that kept "the previous value readable until every account has logged in once", and this
+/// is the facility that sentence needs in order to be true. A lookup tries current, then previous,
+/// then the pre-pepper sha256; any match that is not the current form is rewritten on success.
+///
+/// Set it during a rotation and remove it once the stragglers have signed in. Leaving it set
+/// indefinitely is not a security hole so much as a rotation that never finished.
+pub fn email_pepper_previous() -> Option<Vec<u8>> {
+    std::env::var("EMAIL_PEPPER_PREVIOUS").ok().filter(|v| !v.is_empty()).map(String::into_bytes)
 }
 
 /// Load the bundle, connect, migrate, and reconcile — producing ready-to-serve state.
@@ -328,7 +404,11 @@ pub async fn init_state(bundle_dir: &str, database_url: &str) -> Result<Arc<AppS
         anon_profile_id: seeded.anon_profile_id,
         jwt_secret: jwt_secret().map_err(|e| format!("auth config: {e}"))?,
         email_pepper: email_pepper().map_err(|e| format!("auth config: {e}"))?,
-        auth_rate_limit: Some(RateLimit::default()),
+        email_pepper_previous: email_pepper_previous(),
+        auth_guessing: Some(Guessing::default()),
+        hashing: Arc::new(tokio::sync::Semaphore::new(
+            std::thread::available_parallelism().map_or(4, |n| n.get()).max(2),
+        )),
         token_ttl_secs: 7 * 24 * 3600, // 7 days
         web_dist: std::env::var("WEB_DIST").unwrap_or_else(|_| "web-dist".to_string()),
         atlas,
@@ -455,17 +535,49 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for Admin {
     }
 }
 
-/// Refuse an auth attempt over the window's allowance — 429, with the wait in `Retry-After`.
-fn rate_limit(s: &Arc<AppState>, key: &str) -> Result<(), ApiError> {
-    let Some(limiter) = &s.auth_rate_limit else { return Ok(()) };
-    match limiter.check(key) {
+/// Every lookup key this address could be stored under, current form FIRST.
+///
+/// Three eras: the current pepper, the pepper being rotated out, and the pre-pepper sha256. A row
+/// found under anything but the first is rewritten once its owner proves the password.
+fn lookup_keys(s: &Arc<AppState>, email: &str) -> Vec<String> {
+    let mut keys = vec![auth::email_hash(email, &s.email_pepper)];
+    if let Some(prev) = &s.email_pepper_previous {
+        keys.push(auth::email_hash(email, prev));
+    }
+    keys.push(auth::email_hash_legacy(email));
+    keys
+}
+
+/// Refuse an address that has failed too often inside the window — 429, wait in `Retry-After`.
+fn refuse_if_guessing(s: &Arc<AppState>, key: &str) -> Result<(), ApiError> {
+    let Some(g) = &s.auth_guessing else { return Ok(()) };
+    match g.check(key) {
         Ok(()) => Ok(()),
         Err(secs) => Err(ApiError::new(
             StatusCode::TOO_MANY_REQUESTS,
-            format!("too many attempts — try again in {secs}s"),
+            format!("too many failed attempts — try again in {secs}s"),
         )
         .retry_after(secs)),
     }
+}
+
+/// Run one password hash with the cost bounded: at most `hashing` permits at a time, on a blocking
+/// thread so an argon2 verify never parks a runtime worker. Callers QUEUE here; nobody is refused.
+async fn hash_bounded<T, F>(s: &Arc<AppState>, f: F) -> Result<T, ApiError>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    let permit = s.hashing.clone().acquire_owned().await.map_err(|_| {
+        ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "server is shutting down")
+    })?;
+    let out = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        f()
+    })
+    .await
+    .map_err(|_| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal error"))?;
+    Ok(out)
 }
 
 fn db_err(e: sqlx::Error) -> ApiError {
@@ -930,15 +1042,18 @@ async fn register_route(
     if req.password.len() < 8 {
         return Err((StatusCode::BAD_REQUEST, "password must be at least 8 characters".to_string()).into());
     }
-    let email_hash = auth::email_hash(&req.email, &s.email_pepper);
-    rate_limit(&s, &email_hash)?;
-    // A legacy row carries the pre-pepper key, so the unique index would not catch a second
-    // registration of the same address — two accounts, one email, and the first one unreachable.
-    let legacy = auth::email_hash_legacy(&req.email);
-    if db::find_account_by_email_hash(&s.pool, &legacy).await.map_err(db_err)?.is_some() {
+    let keys = lookup_keys(&s, &req.email);
+    let email_hash = keys[0].clone();
+    refuse_if_guessing(&s, &email_hash)?;
+    // A row stored under an OLDER key form would not collide with the unique index on the current
+    // one, so without this the same person could end up with two accounts and the older of them —
+    // holding all their history — unreachable.
+    if db::find_account_by_any_email_hash(&s.pool, &keys).await.map_err(db_err)?.is_some() {
         return Err(ApiError::new(StatusCode::CONFLICT, "account already exists"));
     }
-    let password_hash = auth::hash_password(&req.password)
+    let pw = req.password.clone();
+    let password_hash = hash_bounded(&s, move || auth::hash_password(&pw))
+        .await?
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "internal error".to_string()))?;
     let locale = req.locale.as_deref().unwrap_or("ro");
     let (account_id, _profile_id) = db::create_account(&s.pool, &email_hash, &password_hash, locale)
@@ -966,37 +1081,56 @@ async fn login_route(
     State(s): State<Arc<AppState>>,
     Json(req): Json<LoginRequest>,
 ) -> Result<Json<AuthResponse>, ApiError> {
-    let email_hash = auth::email_hash(&req.email, &s.email_pepper);
-    rate_limit(&s, &email_hash)?;
-    // Peppered first. A miss may still be an account created before the pepper existed, whose key
-    // cannot be recomputed into the new form without the raw email — so it is recognised by the old
-    // key here and rewritten below, once the password has actually been verified.
-    let mut legacy_row = false;
-    let mut account = db::find_account_by_email_hash(&s.pool, &email_hash).await.map_err(db_err)?;
-    if account.is_none() {
-        account = db::find_account_by_email_hash(&s.pool, &auth::email_hash_legacy(&req.email))
-            .await
-            .map_err(db_err)?;
-        legacy_row = account.is_some();
-    }
+    let keys = lookup_keys(&s, &req.email);
+    let email_hash = keys[0].clone();
+    refuse_if_guessing(&s, &email_hash)?;
+
+    // ONE query for every key form, not one query per form. Looking the current key up and only then
+    // falling back made a hit measurably faster than a miss, which is an enumeration oracle — and
+    // this route goes out of its way to avoid exactly that (see the dummy verify below). `ANY` keeps
+    // every path at a single round trip, and the returned key says which era the row was stored in.
+    let found = db::find_account_by_any_email_hash(&s.pool, &keys).await.map_err(db_err)?;
+
     let unauthorized = || ApiError::new(StatusCode::UNAUTHORIZED, "invalid credentials");
-    match account {
-        Some((account_id, password_hash)) => {
-            if !auth::verify_password(&req.password, &password_hash) {
+    match found {
+        Some((account_id, password_hash, stored_hash)) => {
+            let pw = req.password.clone();
+            let ok = hash_bounded(&s, move || auth::verify_password(&pw, &password_hash)).await?;
+            if !ok {
+                if let Some(g) = &s.auth_guessing {
+                    g.record_failure(&email_hash);
+                }
                 return Err(unauthorized());
+            }
+            // A correct password clears the record: someone who fumbled twice and then got it right
+            // is not carrying a strike, and an attacker cannot lock out a person who knows their own
+            // password — which the count-everything version allowed.
+            if let Some(g) = &s.auth_guessing {
+                g.forget(&email_hash);
             }
             // Upgrade only now: rewriting the key for anyone who merely GUESSES an address would let
             // an unauthenticated caller migrate — and so enumerate — rows they cannot log into.
-            if legacy_row {
-                db::update_email_hash(&s.pool, account_id, &email_hash).await.map_err(db_err)?;
+            if stored_hash != email_hash {
+                // Cosmetic, whichever era the row came from. A transient database error here must
+                // not turn correct credentials into a 500 — the person authenticated; the row can be
+                // migrated on their next login instead.
+                if let Err(e) = db::update_email_hash(&s.pool, account_id, &email_hash).await {
+                    eprintln!("email hash migration failed for an authenticated account: {e}");
+                }
             }
             let token = auth::issue_token(account_id, &s.jwt_secret, s.token_ttl_secs)
                 .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "internal error".to_string()))?;
             Ok(Json(AuthResponse { token, account_id }))
         }
         None => {
-            // Equalize timing with the password-verify path above; result ignored.
-            let _ = auth::verify_password(&req.password, &DUMMY_PW_HASH);
+            // Equalize timing with the verify path above; result ignored. Under the same semaphore,
+            // so a miss costs an attacker a permit exactly as a hit does.
+            let pw = req.password.clone();
+            let dummy = DUMMY_PW_HASH.clone();
+            let _ = hash_bounded(&s, move || auth::verify_password(&pw, &dummy)).await?;
+            if let Some(g) = &s.auth_guessing {
+                g.record_failure(&email_hash);
+            }
             Err(unauthorized())
         }
     }

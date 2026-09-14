@@ -43,7 +43,8 @@ async fn state() -> Arc<AppState> {
             }
             // Fails closed like JWT_SECRET now, for the same reason.
             if std::env::var("EMAIL_PEPPER").is_err() {
-                std::env::set_var("EMAIL_PEPPER", "integration-test-pepper");
+                // >= 32 bytes: the loader refuses a short pepper.
+                std::env::set_var("EMAIL_PEPPER", "integration-test-pepper-0123456789abcdef");
             }
             let s = init_state("bundle/model-v4.2.0", &test_db_url())
                 .await
@@ -1190,8 +1191,10 @@ fn spa_served_with_fallback() {
         anon_account_id: s.anon_account_id, anon_profile_id: s.anon_profile_id,
         jwt_secret: s.jwt_secret.clone(), token_ttl_secs: s.token_ttl_secs,
         email_pepper: s.email_pepper.clone(),
-        // This test is about SPA fallback routing; it touches no auth route, so it carries no limiter.
-        auth_rate_limit: None,
+        email_pepper_previous: s.email_pepper_previous.clone(),
+        // This test is about SPA fallback routing; it touches no auth route, so it carries no guard.
+        auth_guessing: None,
+        hashing: s.hashing.clone(),
         web_dist: dir.to_string_lossy().to_string(),
         atlas: s.atlas.clone(), atlas_etag: s.atlas_etag.clone(),
         places: s.places.clone(),
@@ -1552,17 +1555,19 @@ fn registering_over_a_legacy_row_is_refused() {
     });
 }
 
-/// Guessing one account's password is bounded.
+/// Guessing one account's password is bounded — and knowing it is not.
 #[test]
-fn repeated_login_attempts_are_refused() {
+fn repeated_failures_are_refused_but_a_correct_password_is_not() {
     RT.block_on(async {
     let s = state().await;
     let email = unique_email();
-    call(&s, post("/api/auth/register", json!({"email": email, "password": "password123"}))).await;
+    let password = "password123";
+    let reg = call(&s, post("/api/auth/register", json!({"email": email, "password": password}))).await;
+    assert_eq!(reg.status(), StatusCode::OK);
 
-    // Registration consumed one of this address's allowance; keep guessing until it is refused.
+    // Wrong passwords accumulate.
     let mut saw_429 = false;
-    for _ in 0..12 {
+    for _ in 0..14 {
         let resp = call(&s, post("/api/auth/login", json!({"email": email, "password": "wrong"}))).await;
         if resp.status() == StatusCode::TOO_MANY_REQUESTS {
             // A 429 without Retry-After tells a client it was refused but not when to return.
@@ -1577,10 +1582,60 @@ fn repeated_login_attempts_are_refused() {
     }
     assert!(saw_429, "an attacker guessing one address must eventually be refused");
 
-    // And the refusal is scoped to that address, not to everybody.
+    // The refusal is scoped to that address.
     let other = unique_email();
-    let ok = call(&s, post("/api/auth/register", json!({"email": other, "password": "password123"}))).await;
+    let ok = call(&s, post("/api/auth/register", json!({"email": other, "password": password}))).await;
     assert_eq!(ok.status(), StatusCode::OK, "a different account is unaffected");
+    });
+}
+
+/// Someone who knows their own password can never be locked out of it by a stranger's guessing.
+///
+/// The first version of this counted every attempt, so ten requests a minute against a known address
+/// denied that person their own account — the control was a targeted-lockout primitive.
+#[test]
+fn a_stranger_guessing_cannot_lock_the_owner_out() {
+    RT.block_on(async {
+    let s = state().await;
+    let email = unique_email();
+    let password = "password123";
+    call(&s, post("/api/auth/register", json!({"email": email, "password": password}))).await;
+
+    // Nine wrong guesses — one short of the limit.
+    for _ in 0..9 {
+        let r = call(&s, post("/api/auth/login", json!({"email": email, "password": "wrong"}))).await;
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+    }
+    // The owner gets in, and that clears the record.
+    let ok = call(&s, post("/api/auth/login", json!({"email": email, "password": password}))).await;
+    assert_eq!(ok.status(), StatusCode::OK, "the owner's correct password is not refused");
+
+    // So there is a full allowance again rather than one strike left.
+    for i in 0..9 {
+        let r = call(&s, post("/api/auth/login", json!({"email": email, "password": "wrong"}))).await;
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED, "attempt {i} after a success");
+    }
+    let still_ok = call(&s, post("/api/auth/login", json!({"email": email, "password": password}))).await;
+    assert_eq!(still_ok.status(), StatusCode::OK);
+    });
+}
+
+/// Volume under invented addresses must not refuse anybody — the old global counter did exactly that.
+#[test]
+fn flooding_with_unknown_addresses_does_not_deny_real_users() {
+    RT.block_on(async {
+    let s = state().await;
+    let victim = unique_email();
+    call(&s, post("/api/auth/register", json!({"email": victim, "password": "password123"}))).await;
+
+    for i in 0..40 {
+        let r = call(&s, post("/api/auth/login",
+                    json!({"email": format!("invented-{i}@example.com"), "password": "x"}))).await;
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED, "an unknown address is a 401, not a 429");
+    }
+
+    let ok = call(&s, post("/api/auth/login", json!({"email": victim, "password": "password123"}))).await;
+    assert_eq!(ok.status(), StatusCode::OK, "a real user logs in during the flood");
     });
 }
 

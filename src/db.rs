@@ -25,6 +25,23 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), sqlx::migrate::MigrateE
     MIGRATOR.run(pool).await
 }
 
+/// Find an account by ANY of several lookup keys, returning which one matched.
+///
+/// One round trip whatever the outcome. Querying the peppered key and then falling back to the
+/// legacy one made a hit faster than a miss, and this route is deliberately built so that the two
+/// are indistinguishable — the dummy argon2 verify on the miss path exists for exactly that reason.
+pub async fn find_account_by_any_email_hash(
+    pool: &PgPool,
+    hashes: &[String],
+) -> Result<Option<(Uuid, String, String)>, sqlx::Error> {
+    sqlx::query_as::<_, (Uuid, String, String)>(
+        "SELECT id, password_hash, email_hash FROM account WHERE email_hash = ANY($1) LIMIT 1",
+    )
+    .bind(hashes)
+    .fetch_optional(pool)
+    .await
+}
+
 /// Rewrite an account's lookup key — the lazy half of the email-pepper migration.
 ///
 /// There is no backfill: the peppered key is HMAC over the raw email, and the raw email is never

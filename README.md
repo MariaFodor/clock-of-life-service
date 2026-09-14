@@ -13,18 +13,31 @@ scenarios and reconciles its reference tables (features, questions, active model
   (fail closed). For local development only, `CLOCK_DEV_INSECURE_JWT=1` opts into an insecure
   well-known key (loud startup warning).
 - `EMAIL_PEPPER` is the key for the account lookup hash (HMAC-SHA256 of the normalized email) and is
-  **required** on the same terms — the same `CLOCK_DEV_INSECURE_JWT=1` flag opts into a development
-  pepper, with its own warning. It is never written to the database, which is the point: a dumped
-  `account` table has nothing to grind against.
+  **required** on the same terms, with a 32-byte minimum — the same `CLOCK_DEV_INSECURE_JWT=1` flag
+  opts into a development pepper, with its own warning. It is never written to the database, which is
+  the point: a dumped `account` table has nothing to grind against.
 
-  **Changing it locks every existing account out.** The key is HMAC over the raw email, and the raw
-  email is never stored (ADR-002), so it cannot be recomputed for an existing row. Accounts created
-  before the pepper are migrated lazily instead — recognised by their old `sha256(email)` key on the
-  next *successful* login and rewritten then. Rotating the pepper means running that migration again,
-  which means keeping the previous value readable until every account has logged in once.
-- Auth rate limits (`/api/auth/register`, `/api/auth/login`): 10 attempts per address per minute, and
-  600 in total per minute across all addresses. The first bounds password guessing; the second bounds
-  the argon2id cost of being asked at all. Refusals are `429` with `Retry-After`.
+  The key cannot be recomputed for an existing row, because it is HMAC over the raw email and the raw
+  email is never stored (ADR-002). Accounts are therefore migrated **lazily**: a row found under an
+  older key form is rewritten to the current one on the next *successful* login. That covers both the
+  pre-pepper `sha256(email)` rows and a rotation.
+- `EMAIL_PEPPER_PREVIOUS` makes rotation safe, and is only needed while one is in flight. Set it to
+  the outgoing value, deploy the new `EMAIL_PEPPER`, and every login tries current → previous →
+  pre-pepper, rewriting to current on success. Remove it once the stragglers have signed in.
+
+  **Without it, changing `EMAIL_PEPPER` locks every existing account out** — and worse than locked
+  out: registration's duplicate check would no longer see the old rows, so a returning user could
+  create a *second* account under the same address with the first one, holding all their history,
+  unreachable.
+- Auth protection on `/api/auth/register` and `/api/auth/login`, in two parts because they guard
+  different things:
+  - **guessing** — 10 *failed* attempts per address per minute, answered `429` with `Retry-After`.
+    Only failures count and a correct password clears the record, so nobody can be locked out of an
+    account whose password they know.
+  - **cost** — argon2id runs under a semaphore sized to the machine's cores, on blocking threads.
+    Callers queue; nobody is refused. A counter was tried here first and was a mistake: a global
+    request cap is a shared-fate control, so filling it denied every user at once and cost the
+    attacker nothing to hold.
 
 ```bash
 createdb clock_of_life          # once
