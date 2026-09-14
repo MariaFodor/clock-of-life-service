@@ -354,7 +354,9 @@ fn a_changed_result_appends_even_when_the_answers_did_not_change() {
     let years = first["estimate_years"].as_f64().unwrap();
 
     // Simulate the re-score: same answers and model version, a different stored result. Written
-    // directly, because making the real scorer disagree with itself needs a bundle swap.
+    // directly, because making the real scorer disagree with itself needs a bundle swap. This is the
+    // one UPDATE in the suite against a table migrations/0001_init.sql marks APPEND-ONLY (a comment,
+    // not a constraint) — it stands in for a scoring change, and is not a licence to write one.
     let calc_id = first["calculation_id"].as_str().unwrap();
     sqlx::query("UPDATE calculation SET estimate_years = estimate_years + 2 WHERE id = $1::uuid")
         .bind(calc_id)
@@ -368,9 +370,15 @@ fn a_changed_result_appends_even_when_the_answers_did_not_change() {
     assert_ne!(again["calculation_id"].as_str().unwrap(), calc_id,
                "the stored number no longer matches, so this is a new snapshot");
     let rows = body_json(call(&s, get_auth("/api/calculations", &token)).await).await;
-    assert_eq!(rows.as_array().unwrap().len(), 2, "history keeps both");
-    assert_eq!(again["estimate_years"].as_f64().unwrap(), years,
-               "and the served number is the one that was actually stored");
+    let rows = rows.as_array().unwrap();
+    assert_eq!(rows.len(), 2, "history keeps both");
+    // Read the STORED number back, not the previous response. Comparing the two responses would be a
+    // tautology — both carry a freshly computed estimate from a deterministic scorer, so it passes
+    // with or without the fix and never touches the row the assertion is about.
+    assert_eq!(rows[0]["estimate_years"].as_f64().unwrap(), years,
+               "the newest row holds the number that was actually served");
+    assert_ne!(rows[1]["estimate_years"].as_f64().unwrap(), years,
+               "and the nudged older row is still there, still different");
     });
 }
 

@@ -135,7 +135,10 @@ pub async fn insert_calculation(
     attributions: &Value,
 ) -> Result<Uuid, sqlx::Error> {
     let mut tx = pool.begin().await?;
-    // Serialise the read-then-maybe-insert for THIS account only. Different accounts never contend;
+    // Serialise the read-then-maybe-insert for THIS account only. Different accounts contend only on
+    // a 64-bit hash collision (~2^-64), where the cost is a brief spurious wait and never a wrong
+    // answer, because the guarded statement is itself scoped `WHERE account_id = $1`. Different
+    // accounts effectively never contend;
     // the shared anonymous account is the one hot key, and it is also where the race was continuous.
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))")
         .bind(account_id.to_string())
@@ -164,8 +167,15 @@ pub async fn insert_calculation(
          inserted AS (
              INSERT INTO calculation
                (account_id, model_version_id, input_hash, inputs,
-                estimate_years, interval_low, interval_high, reaches_age, relative_risk, attributions)
-             SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10
+                estimate_years, interval_low, interval_high, reaches_age, relative_risk,
+                attributions, created_at)
+             -- clock_timestamp(), not the column's now() default. now() is transaction_timestamp(),
+             -- stamped at BEGIN — which is now BEFORE the advisory-lock wait. A transaction that
+             -- began first but acquired the lock last would stamp its row EARLIER than one already
+             -- inserted, and since `newest` orders by created_at, the top of history would become
+             -- arrival order rather than insert order. Sub-millisecond window, but it exists only
+             -- because this statement grew a lock wait, so it is this statement's to close.
+             SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, clock_timestamp()
              WHERE NOT EXISTS (SELECT 1 FROM repeat)
              RETURNING id
          )
