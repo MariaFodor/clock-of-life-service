@@ -304,6 +304,89 @@ fn identical_answers_do_not_append_history() {
     });
 }
 
+/// The historical cleanup: duplicate rows written before the service stopped writing them.
+///
+/// Runs the SHIPPED migration SQL via include_str!, not a copy of it — a test that restates the
+/// statement it is checking stops checking it the moment the two drift. The migration has already run
+/// once at startup (against a truncated table, so a no-op); re-running it is safe because a DELETE of
+/// rows that no longer exist is idempotent.
+#[test]
+fn duplicate_history_rows_are_collapsed_and_scenarios_survive() {
+    RT.block_on(async {
+    let s = state().await;
+    let token = register_token(&s).await;
+    let account: uuid::Uuid = sqlx::query_scalar(
+        "SELECT account_id FROM calculation WHERE id = $1::uuid")
+        .bind(body_json(call(&s, post_auth("/api/estimate", valid_profile(), &token)).await).await
+            ["calculation_id"].as_str().unwrap())
+        .fetch_one(&s.pool).await.expect("the account behind the seed calculation");
+
+    // Wipe that seed row so this account's history is exactly what the fixture below writes.
+    sqlx::query("DELETE FROM calculation WHERE account_id = $1").bind(account)
+        .execute(&s.pool).await.unwrap();
+
+    let model: uuid::Uuid = sqlx::query_scalar("SELECT id FROM model_version WHERE is_active")
+        .fetch_one(&s.pool).await.unwrap();
+
+    // A -> A -> A -> B -> A, written directly, which is what the old service produced per click.
+    // The fourth "A" carries a DIFFERENT attributions snapshot: same answers, same numbers, richer
+    // evidence — which happens when a citation is added without the model version moving. It must
+    // survive, because deleting it would destroy the only copy of that snapshot.
+    let mut ids = Vec::new();
+    for (i, (hash, years, attrs)) in [
+        ("aaa", 40.0, "[]"), ("aaa", 40.0, "[]"), ("aaa", 40.0, "[]"),
+        ("bbb", 38.0, "[]"), ("aaa", 40.0, "[]"),
+        ("aaa", 40.0, r#"[{"factor":"waist"}]"#),
+    ].iter().enumerate()
+    {
+        let id: uuid::Uuid = sqlx::query_scalar(
+            "INSERT INTO calculation (account_id, model_version_id, input_hash, inputs,
+                 estimate_years, interval_low, interval_high, reaches_age, relative_risk,
+                 attributions, created_at)
+             VALUES ($1,$2,$3,'{}'::jsonb,$4::numeric,1,2,80,1.0,$6::jsonb, now() + ($5 || ' ms')::interval)
+             RETURNING id")
+            .bind(account).bind(model).bind(hash).bind(years).bind((i * 10) as i32).bind(attrs)
+            .fetch_one(&s.pool).await.expect("fixture row");
+        ids.push(id);
+    }
+
+    // A What-If saved against the SECOND row — a duplicate, so its base is about to be deleted and
+    // scenario.base_calculation_id is ON DELETE CASCADE.
+    let scenario: uuid::Uuid = sqlx::query_scalar(
+        "INSERT INTO scenario (base_calculation_id, modifications, result)
+         VALUES ($1, '{}'::jsonb, '{}'::jsonb) RETURNING id")
+        .bind(ids[1]).fetch_one(&s.pool).await.expect("scenario on a duplicate");
+
+    // The WHOLE file on ONE connection, exactly as sqlx's migrator runs it. Splitting it per
+    // statement would put each on a different pooled connection, and the temp table the migration
+    // builds is per-session — the split version fails on a table the real migration has no trouble
+    // with, which would be a test failing for a reason the product does not have.
+    sqlx::raw_sql(include_str!("../migrations/0008_collapse_duplicate_calculations.sql"))
+        .execute(&s.pool)
+        .await
+        .expect("the shipped migration runs");
+
+    let survivors: Vec<(uuid::Uuid, String)> = sqlx::query_as(
+        "SELECT id, input_hash FROM calculation WHERE account_id = $1 ORDER BY created_at, id")
+        .bind(account).fetch_all(&s.pool).await.unwrap();
+
+    // Four rows: the FIRST of the A-run, then B, then the return to A, then the A that carries a
+    // different evidence snapshot — which repeats the row before it on every column the live rule
+    // matches, and is kept anyway because destroying it would lose the only copy of that snapshot.
+    assert_eq!(survivors.len(), 4, "A->A->A->B->A->A' collapses to four: {survivors:?}");
+    assert_eq!(survivors[0].0, ids[0], "the first of the run survives, not the last");
+    assert_eq!(survivors[1].0, ids[3], "B is untouched");
+    assert_eq!(survivors[2].0, ids[4], "returning to earlier answers stays its own snapshot");
+    assert_eq!(survivors[3].0, ids[5], "and a differing attributions snapshot is never destroyed");
+
+    // The What-If is still there, repointed at the survivor rather than cascaded away.
+    let base: Option<uuid::Uuid> = sqlx::query_scalar(
+        "SELECT base_calculation_id FROM scenario WHERE id = $1")
+        .bind(scenario).fetch_optional(&s.pool).await.unwrap();
+    assert_eq!(base, Some(ids[0]), "the scenario survived, repointed at the row that was kept");
+    });
+}
+
 /// The race the first version of this fix claimed was impossible.
 ///
 /// The original comment said a single statement meant two clicks could not both insert. That is
