@@ -159,6 +159,36 @@ pub struct Estimate {
     pub interval: [f64; 2],
     pub reaches_age: f64,
     pub relative_risk: f64,
+    /// The country's own life-table figure for THIS sex and age: `remaining_le` at rr = 1.0.
+    ///
+    /// Why it exists: the web client used to build a hardcoded "average person" (never smoked, 600
+    /// MET-min/week, waist 84/96, income 2.5, no conditions) and score it through this endpoint. The
+    /// model rates that profile between 0.55x and 0.67x depending on country, age and sex — so one
+    /// screen compared a reader against a healthy invention while calling it "the average person of
+    /// your age and sex", directly beneath a risk figure centred on the country's population. A
+    /// Cypriot woman of 32 was told she fell 0.2 years short of average when the life table puts her
+    /// 4.2 years ahead of it.
+    ///
+    /// WHAT THIS IS NOT, stated because the difference is a real half-year and was missed once
+    /// already: this figure is SEX-SPECIFIC — it reads the life table for the reader's own sex —
+    /// while `relative_risk` is NOT. `design()` emits no sex term and `RefLp` has no sex dimension,
+    /// because the model centres on Eurostat's sex-pooled (`sex=T`) prevalence. So rr = 1.0 names a
+    /// sex-pooled composite, not the average man or the average woman. Measured: RO age 40, identical
+    /// answers, M and F both score rr 0.531 against averages of 34.0 and 40.6. Ten points of
+    /// male-female gap in smoking prevalence pull the two true references about half a year APART at
+    /// age 40 (measured RO: -0.30 y for men, +0.24 y for women) — not half a year each, and much less
+    /// above 55, where the `smk_current_x_young` interaction drops out. Romania's real gap is about
+    /// 19 points, which puts a genuinely average Romanian man near rr 1.05. The two figures agree in direction; they are not
+    /// centred on the same person, and closing that needs a sex-stratified refit, not a serving change.
+    ///
+    /// `None` where the country's `reference_lp` was NOT built from its own measured prevalence —
+    /// Switzerland, today. There the bundle itself records that the reference is a non-smoker of
+    /// cohort-average weight rather than an average Swiss person, and that the relative risk is
+    /// overstated by x1.125. Serving an average there would turn a known bias into a specific years
+    /// claim against the very life table that disproves it: an average Swiss man of 40 would read
+    /// that he falls about a year short of his own countrymen. A missing comparison is honest; that
+    /// one would not be.
+    pub national_avg_years: Option<f64>,
     pub country: String,
 }
 
@@ -381,10 +411,17 @@ pub fn estimate(bundle: &Bundle, p: &Profile) -> Result<Estimate, String> {
     let (rr, base) = risk(bundle, p)?;
     let qx = base.qx.get(&p.sex).ok_or_else(|| format!("no qx for sex {}", p.sex))?;
 
-    let years = remaining_le(qx, p.age.round() as i64, rr, base.ax(&p.sex));
+    let age = p.age.round() as i64;
+    let years = remaining_le(qx, age, rr, base.ax(&p.sex));
+    // The average person of this age and sex here: the same table, the same integrator, rr = 1.0 —
+    // but only where rr = 1.0 means something about THIS country. See the field's own comment.
+    let avg = base
+        .reference_is_measured()
+        .then(|| round1(remaining_le(qx, age, 1.0, base.ax(&p.sex))));
     let rel = if p.age >= 55.0 { 0.06 } else { 0.10 }; // interval widens for the young (sparse deaths) — heuristic v1
     Ok(Estimate {
         estimate_years: round1(years),
+        national_avg_years: avg,
         interval: [round1(years * (1.0 - rel)), round1(years * (1.0 + rel))],
         reaches_age: round1(p.age + years),
         relative_risk: (rr * 1000.0).round() / 1000.0,
@@ -909,6 +946,104 @@ mod tests {
             let national = ro.national_le_40[sex];
             assert!((le - national).abs() < 0.1, "{sex}: {le} vs national {national}");
         }
+    }
+
+    #[test]
+    fn served_average_never_contradicts_the_risk_ratio() {
+        // The defect this pins: the two figures on the Life Clock disagreed about direction. A reader
+        // below average risk was told she had fewer years left than "the average person", because the
+        // page's average was a hardcoded healthy person scored at ~0.58x rather than rr = 1.0.
+        //
+        // Asserted TWICE, on purpose. The strict inequality holds on the raw integrator; the SERVED
+        // figures are both rounded to one decimal, and rounding can collapse a real difference to
+        // equality — measured, rr in [0.99171, 1.00322] at RO/F/40 ties. Rounding is monotone so it can
+        // never FLIP the sign, which is why the served assertion is >= rather than >. Asserting > on
+        // the served values would be a test that fails for a profile the product answers correctly.
+        let b = bundle();
+        let p = |smoke, pa, waist, diab| Profile {
+            country: "RO".into(), age: 40.0, sex: "F".into(), smoke, pa_min: pa, sleep: 7.0,
+            waist, bmi: Some(27.0), cigs_day: 0.0, sbp: None, diabetes: diab, high_bp: diab,
+            respiratory: false, cvd_hx: false, cancer_hx: false, higher_educ: true, income: 4.0,
+            pm25: None, ndvi: None, diet_score: None, alcohol: None, sitting_hours: None,
+            stress_score: None, mobility: None,
+        };
+        let ro = &b.baselines["RO"];
+        for prof in [p(0, 2000.0, 85.0, false), p(2, 0.0, 115.0, true), p(1, 600.0, 95.0, false)] {
+            let e = estimate(&b, &prof).unwrap();
+            let served = e.national_avg_years.expect("RO has measured prevalence");
+            // Unrounded, where the inequality is exact.
+            let raw_avg = remaining_le(&ro.qx["F"], 40, 1.0, ro.ax("F"));
+            let raw_you = remaining_le(&ro.qx["F"], 40, e.relative_risk, ro.ax("F"));
+            if e.relative_risk < 1.0 {
+                assert!(raw_you > raw_avg, "rr {} below average must mean more years", e.relative_risk);
+                assert!(e.estimate_years >= served,
+                        "rr {} below average, so {} must not fall under the average {served}",
+                        e.relative_risk, e.estimate_years);
+            } else if e.relative_risk > 1.0 {
+                assert!(raw_you < raw_avg, "rr {} above average must mean fewer years", e.relative_risk);
+                assert!(e.estimate_years <= served,
+                        "rr {} above average, so {} must not exceed the average {served}",
+                        e.relative_risk, e.estimate_years);
+            }
+        }
+    }
+
+    #[test]
+    fn the_served_average_is_the_life_table_itself() {
+        // rr = 1.0 is not "a healthy person" — it is the national figure. `national_le_40` is written
+        // by the PYTHON model's own remaining_le, so this is a cross-language check rather than a
+        // restatement of what the Rust just computed.
+        let b = bundle();
+        let ro = &b.baselines["RO"];
+        for sex in ["M", "F"] {
+            let prof = Profile {
+                country: "RO".into(), age: 40.0, sex: sex.into(), smoke: 0, pa_min: 600.0,
+                sleep: 7.0, waist: 90.0, bmi: Some(25.0), cigs_day: 0.0, sbp: None,
+                diabetes: false, high_bp: false, respiratory: false, cvd_hx: false,
+                cancer_hx: false, higher_educ: false, income: 3.0, pm25: None, ndvi: None,
+                diet_score: None, alcohol: None, sitting_hours: None, stress_score: None,
+                mobility: None,
+            };
+            let e = estimate(&b, &prof).unwrap();
+            let served = e.national_avg_years.expect("RO has measured prevalence");
+            let national = ro.national_le_40[sex];
+            assert!((served - national).abs() < 0.1,
+                    "{sex}: served average {served} vs the Python model's own figure {national}");
+        }
+    }
+
+    #[test]
+    fn a_country_whose_reference_is_invented_serves_no_average() {
+        // Switzerland ships `prevalence: null`, and its own artifact says the reference person is a
+        // non-smoker of cohort-average weight rather than an average Swiss person — the model measures
+        // the resulting relative risk as overstated by x1.125. Serving an average there would tell a
+        // genuinely average Swiss man he falls about a year short of his own countrymen, as a specific
+        // number, against the very life table that says otherwise.
+        let b = bundle();
+        let ch = &b.baselines["CH"];
+        assert!(!ch.reference_is_measured(), "CH is the country this guard exists for");
+        assert!(ch.prevalence_source.as_deref().unwrap_or("").contains("NO PREVALENCE"),
+                "and the bundle says so itself");
+
+        let prof = Profile {
+            country: "CH".into(), age: 40.0, sex: "M".into(), smoke: 0, pa_min: 600.0, sleep: 7.0,
+            waist: 94.0, bmi: Some(25.0), cigs_day: 0.0, sbp: None, diabetes: false, high_bp: false,
+            respiratory: false, cvd_hx: false, cancer_hx: false, higher_educ: false, income: 3.0,
+            pm25: None, ndvi: None, diet_score: None, alcohol: None, sitting_hours: None,
+            stress_score: None, mobility: None,
+        };
+        let e = estimate(&b, &prof).unwrap();
+        assert!(e.national_avg_years.is_none(), "CH must not be given a national average");
+        assert!(e.estimate_years > 0.0, "but the estimate itself is still served");
+
+        // And it is a guard, not an outage: every OTHER scoreable country carries prevalence and is
+        // served an average. Checked across all of them rather than asserted about one.
+        for (iso, base) in &b.baselines {
+            let served = base.reference_is_measured();
+            assert_eq!(served, iso != "CH", "{iso}: exactly one scoreable country lacks prevalence");
+        }
+        let ro = estimate(&b, &Profile { country: "RO".into(), ..prof }).unwrap();
+        assert!(ro.national_avg_years.is_some(), "RO has measured prevalence and must serve it");
     }
 
     #[test]
