@@ -12,6 +12,19 @@ scenarios and reconciles its reference tables (features, questions, active model
 - `JWT_SECRET` signs bearer tokens and is **required**: without it the service refuses to start
   (fail closed). For local development only, `CLOCK_DEV_INSECURE_JWT=1` opts into an insecure
   well-known key (loud startup warning).
+- `EMAIL_PEPPER` is the key for the account lookup hash (HMAC-SHA256 of the normalized email) and is
+  **required** on the same terms — the same `CLOCK_DEV_INSECURE_JWT=1` flag opts into a development
+  pepper, with its own warning. It is never written to the database, which is the point: a dumped
+  `account` table has nothing to grind against.
+
+  **Changing it locks every existing account out.** The key is HMAC over the raw email, and the raw
+  email is never stored (ADR-002), so it cannot be recomputed for an existing row. Accounts created
+  before the pepper are migrated lazily instead — recognised by their old `sha256(email)` key on the
+  next *successful* login and rewritten then. Rotating the pepper means running that migration again,
+  which means keeping the previous value readable until every account has logged in once.
+- Auth rate limits (`/api/auth/register`, `/api/auth/login`): 10 attempts per address per minute, and
+  600 in total per minute across all addresses. The first bounds password guessing; the second bounds
+  the argon2id cost of being asked at all. Refusals are `429` with `Retry-After`.
 
 ```bash
 createdb clock_of_life          # once

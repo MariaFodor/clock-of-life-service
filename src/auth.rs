@@ -9,6 +9,7 @@ use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, Salt
 use argon2::Argon2;
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
+use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -31,10 +32,37 @@ pub fn verify_password(password: &str, phc: &str) -> bool {
     }
 }
 
-/// Deterministic, normalized (trim + lowercase) sha256 of the email — the account's unique lookup key.
-pub fn email_hash(email: &str) -> String {
-    let normalized = email.trim().to_lowercase();
-    let digest = Sha256::digest(normalized.as_bytes());
+/// Normalize an email the same way for both hashes: trim, lowercase.
+fn normalize(email: &str) -> String {
+    email.trim().to_lowercase()
+}
+
+/// The account's unique lookup key: HMAC-SHA256 of the normalized email under a server-side pepper.
+///
+/// Was a bare `sha256(email)`. That is deterministic, which is what a login lookup needs — and also
+/// what an attacker holding a dumped table needs. Emails carry almost no entropy: a few hundred
+/// million candidates from any breach corpus, hashed once each, reverses the column. The product
+/// tells people "we store only a hashed form of your email", and an unsalted digest of a
+/// low-entropy input does not make that sentence true.
+///
+/// A per-row salt is not available to us — the lookup has to be computable from the email alone at
+/// login time, and the raw email is never stored (ADR-002). A pepper is the construction that fits:
+/// one secret, held by the service and never in the database, so the digest stays deterministic for
+/// lookup while an offline attack on a stolen table has nothing to grind against.
+pub fn email_hash(email: &str, pepper: &[u8]) -> String {
+    let mut mac = <Hmac<Sha256>>::new_from_slice(pepper).expect("HMAC accepts any key length");
+    mac.update(normalize(email).as_bytes());
+    mac.finalize().into_bytes().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The pre-pepper lookup key, kept ONLY so existing accounts can still log in.
+///
+/// There is no backfill available: the peppered key cannot be derived from the old one, and the raw
+/// email that would let us compute it was never stored. So the migration is lazy — a legacy row is
+/// recognised on the next successful login and rewritten to the peppered key then. This function is
+/// what recognises it, and it can be deleted once no legacy rows remain.
+pub fn email_hash_legacy(email: &str) -> String {
+    let digest = Sha256::digest(normalize(email).as_bytes());
     digest.iter().map(|b| format!("{b:02x}")).collect()
 }
 
@@ -80,9 +108,35 @@ mod tests {
 
     #[test]
     fn email_hash_is_normalized_and_deterministic() {
-        assert_eq!(email_hash("  Alice@Example.COM "), email_hash("alice@example.com"));
-        assert_ne!(email_hash("a@b.com"), email_hash("c@d.com"));
-        assert_eq!(email_hash("a@b.com").len(), 64, "sha256 hex");
+        let p = b"pepper";
+        assert_eq!(email_hash("  Alice@Example.COM ", p), email_hash("alice@example.com", p));
+        assert_ne!(email_hash("a@b.com", p), email_hash("c@d.com", p));
+        assert_eq!(email_hash("a@b.com", p).len(), 64, "sha256 hex");
+    }
+
+    #[test]
+    fn the_pepper_is_what_makes_the_hash_unguessable() {
+        // The defect: a dumped `account` table plus any breach corpus reverses an unsalted sha256 of
+        // an email, because emails carry almost no entropy. These two assertions are the fix — the
+        // digest is no longer computable from the address alone, and it is not the old one.
+        assert_ne!(
+            email_hash("alice@example.com", b"pepper-a"),
+            email_hash("alice@example.com", b"pepper-b"),
+            "the same address under different peppers must not collide"
+        );
+        assert_ne!(
+            email_hash("alice@example.com", b"pepper-a"),
+            email_hash_legacy("alice@example.com"),
+            "and must not reproduce the value an attacker can compute unaided"
+        );
+    }
+
+    #[test]
+    fn the_legacy_hash_still_recognises_an_old_row() {
+        // It has to keep working exactly as it did, or every account created before the pepper is
+        // locked out — there is no backfill, because the raw email was never stored.
+        assert_eq!(email_hash_legacy("  Alice@Example.COM "), email_hash_legacy("alice@example.com"));
+        assert_eq!(email_hash_legacy("a@b.com").len(), 64);
     }
 
     #[test]

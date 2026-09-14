@@ -11,7 +11,7 @@ use std::sync::{Arc, LazyLock};
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use clock_of_life_service::{build_router, init_state, seed, AppState};
+use clock_of_life_service::{auth, build_router, db, init_state, seed, AppState};
 use serde_json::{json, Value};
 use tokio::sync::OnceCell;
 use tower::ServiceExt; // for `oneshot`
@@ -40,6 +40,10 @@ async fn state() -> Arc<AppState> {
             // The service now fails closed without a JWT secret (S5); tests supply one.
             if std::env::var("JWT_SECRET").is_err() {
                 std::env::set_var("JWT_SECRET", "integration-test-secret");
+            }
+            // Fails closed like JWT_SECRET now, for the same reason.
+            if std::env::var("EMAIL_PEPPER").is_err() {
+                std::env::set_var("EMAIL_PEPPER", "integration-test-pepper");
             }
             let s = init_state("bundle/model-v4.2.0", &test_db_url())
                 .await
@@ -1185,6 +1189,9 @@ fn spa_served_with_fallback() {
         bundle: s.bundle.clone(), pool: s.pool.clone(), active_model_id: s.active_model_id,
         anon_account_id: s.anon_account_id, anon_profile_id: s.anon_profile_id,
         jwt_secret: s.jwt_secret.clone(), token_ttl_secs: s.token_ttl_secs,
+        email_pepper: s.email_pepper.clone(),
+        // This test is about SPA fallback routing; it touches no auth route, so it carries no limiter.
+        auth_rate_limit: None,
         web_dist: dir.to_string_lossy().to_string(),
         atlas: s.atlas.clone(), atlas_etag: s.atlas_etag.clone(),
         places: s.places.clone(),
@@ -1482,6 +1489,98 @@ fn two_user_isolation() {
     // A still sees its own.
     let a_hist = body_json(call(&s, get_auth("/api/calculations", &token_a)).await).await;
     assert!(a_hist.as_array().unwrap().len() >= 1, "A sees its own history");
+    });
+}
+
+/// An account created before the pepper existed can still log in, and is migrated when it does.
+///
+/// There is no backfill available: the peppered key is HMAC over the raw email, and the raw email is
+/// never stored. So the only moment the new key can be computed for an existing row is a login, when
+/// the person supplies the address themselves.
+#[test]
+fn a_legacy_account_logs_in_once_and_is_upgraded() {
+    RT.block_on(async {
+    let s = state().await;
+    let email = unique_email();
+    let password = "password123";
+
+    // A row exactly as it would have been written before this change.
+    let legacy = auth::email_hash_legacy(&email);
+    let pw = auth::hash_password(password).unwrap();
+    db::create_account(&s.pool, &legacy, &pw, "ro").await.expect("legacy account created");
+
+    let resp = call(&s, post("/api/auth/login", json!({"email": email, "password": password}))).await;
+    assert_eq!(resp.status(), StatusCode::OK, "a pre-pepper account must not be locked out");
+
+    // The row now carries the peppered key, and the old one no longer resolves.
+    let peppered = auth::email_hash(&email, &s.email_pepper);
+    assert!(db::find_account_by_email_hash(&s.pool, &peppered).await.unwrap().is_some(),
+            "the row was rewritten to the peppered key");
+    assert!(db::find_account_by_email_hash(&s.pool, &legacy).await.unwrap().is_none(),
+            "and the key an attacker could compute unaided is gone");
+
+    // Still works on the second login, now via the peppered path.
+    let again = call(&s, post("/api/auth/login", json!({"email": email, "password": password}))).await;
+    assert_eq!(again.status(), StatusCode::OK);
+
+    // A wrong password on a legacy row must NOT migrate it — otherwise an unauthenticated caller
+    // could rewrite, and so confirm the existence of, any address they merely guessed.
+    let email2 = unique_email();
+    let legacy2 = auth::email_hash_legacy(&email2);
+    db::create_account(&s.pool, &legacy2, &pw, "ro").await.unwrap();
+    let bad = call(&s, post("/api/auth/login", json!({"email": email2, "password": "wrong-password"}))).await;
+    assert_eq!(bad.status(), StatusCode::UNAUTHORIZED);
+    assert!(db::find_account_by_email_hash(&s.pool, &legacy2).await.unwrap().is_some(),
+            "a failed login leaves the row where it was");
+    });
+}
+
+/// Registering an address that exists as a legacy row is still a conflict.
+///
+/// The unique index is on the stored key, so without an explicit check the same person could hold
+/// two accounts under one email — and the older one, holding their history, would be unreachable.
+#[test]
+fn registering_over_a_legacy_row_is_refused() {
+    RT.block_on(async {
+    let s = state().await;
+    let email = unique_email();
+    let pw = auth::hash_password("password123").unwrap();
+    db::create_account(&s.pool, &auth::email_hash_legacy(&email), &pw, "ro").await.unwrap();
+
+    let resp = call(&s, post("/api/auth/register", json!({"email": email, "password": "password123"}))).await;
+    assert_eq!(resp.status(), StatusCode::CONFLICT, "one email, one account");
+    });
+}
+
+/// Guessing one account's password is bounded.
+#[test]
+fn repeated_login_attempts_are_refused() {
+    RT.block_on(async {
+    let s = state().await;
+    let email = unique_email();
+    call(&s, post("/api/auth/register", json!({"email": email, "password": "password123"}))).await;
+
+    // Registration consumed one of this address's allowance; keep guessing until it is refused.
+    let mut saw_429 = false;
+    for _ in 0..12 {
+        let resp = call(&s, post("/api/auth/login", json!({"email": email, "password": "wrong"}))).await;
+        if resp.status() == StatusCode::TOO_MANY_REQUESTS {
+            // A 429 without Retry-After tells a client it was refused but not when to return.
+            let retry = resp.headers().get(axum::http::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.parse::<u64>().ok());
+            assert!(matches!(retry, Some(1..=61)), "Retry-After should name the wait: {retry:?}");
+            saw_429 = true;
+            break;
+        }
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+    assert!(saw_429, "an attacker guessing one address must eventually be refused");
+
+    // And the refusal is scoped to that address, not to everybody.
+    let other = unique_email();
+    let ok = call(&s, post("/api/auth/register", json!({"email": other, "password": "password123"}))).await;
+    assert_eq!(ok.status(), StatusCode::OK, "a different account is unaffected");
     });
 }
 
