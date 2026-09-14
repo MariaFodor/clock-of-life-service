@@ -30,12 +30,21 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), sqlx::migrate::MigrateE
 /// One round trip whatever the outcome. Querying the peppered key and then falling back to the
 /// legacy one made a hit faster than a miss, and this route is deliberately built so that the two
 /// are indistinguishable — the dummy argon2 verify on the miss path exists for exactly that reason.
+///
+/// `ORDER BY array_position` because `= ANY` does NOT honour the array's order: Postgres sorts the
+/// values and walks the index in ITS order, so a bare `LIMIT 1` returns whichever digest the btree
+/// reaches first. With two rows matching — a rotation deployed without EMAIL_PEPPER_PREVIOUS leaves
+/// exactly that — a returning user would land in whichever of the two split accounts the hash values
+/// happened to favour, rather than the current one.
 pub async fn find_account_by_any_email_hash(
     pool: &PgPool,
     hashes: &[String],
 ) -> Result<Option<(Uuid, String, String)>, sqlx::Error> {
     sqlx::query_as::<_, (Uuid, String, String)>(
-        "SELECT id, password_hash, email_hash FROM account WHERE email_hash = ANY($1) LIMIT 1",
+        "SELECT id, password_hash, email_hash FROM account
+         WHERE email_hash = ANY($1)
+         ORDER BY array_position($1, email_hash)
+         LIMIT 1",
     )
     .bind(hashes)
     .fetch_optional(pool)

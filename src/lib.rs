@@ -104,6 +104,8 @@ use sqlx::postgres::PgPool;
 pub struct Guessing {
     pub max_failures: u32,
     pub window: std::time::Duration,
+    /// Sweep expired entries once the map reaches this size, rather than on every call.
+    pub sweep_at: usize,
     buckets: std::sync::Mutex<HashMap<String, (std::time::Instant, u32)>>,
 }
 
@@ -114,26 +116,34 @@ impl Default for Guessing {
             // a real person's fumbling, and harmless to someone who knows their password.
             max_failures: 10,
             window: std::time::Duration::from_secs(60),
+            sweep_at: 1024,
             buckets: std::sync::Mutex::new(HashMap::new()),
         }
     }
 }
 
 impl Guessing {
-    /// `Ok(())` to let this attempt proceed; `Err(seconds)` to refuse it.
+    /// `Ok(())` if this address is not over its limit; `Err(seconds)` if it is.
+    ///
+    /// O(1). It used to sweep the whole map under the mutex on every call, which is work paid on the
+    /// path an attacker controls: once an address is over the limit each further request was refused
+    /// without hashing, and still cost a full scan. Measured at 10k entries that was 94 us of
+    /// lock-held time per refusal, serialising every legitimate login behind it. Expiry is now read
+    /// lazily here and swept on the write path, which an attacker cannot reach for free.
     pub fn check(&self, key: &str) -> Result<(), u64> {
         let now = std::time::Instant::now();
-        // A poisoned lock must not take auth down. `into_inner` keeps the counts we have rather than
-        // discarding them, which is what `unwrap_or(Ok(()))` used to do — nothing here can panic
-        // while holding it, but recovering is strictly better than allowing.
-        let mut buckets = self
+        let buckets = self
             .buckets
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        buckets.retain(|_, (started, _)| now.duration_since(*started) < self.window);
         match buckets.get(key) {
             Some((started, n)) if *n >= self.max_failures => {
-                Err(self.window.saturating_sub(now.duration_since(*started)).as_secs() + 1)
+                let age = now.duration_since(*started);
+                if age >= self.window {
+                    Ok(()) // the window closed; the entry is stale and the next write will drop it
+                } else {
+                    Err(self.window.saturating_sub(age).as_secs() + 1)
+                }
             }
             _ => Ok(()),
         }
@@ -142,13 +152,17 @@ impl Guessing {
     /// Record one failed attempt. Only failures are counted, so success never fills the bucket.
     pub fn record_failure(&self, key: &str) {
         let now = std::time::Instant::now();
-        let Ok(mut buckets) = self.buckets.lock().or_else(|e| Ok::<_, ()>(e.into_inner())) else {
-            return;
-        };
-        // Bounded by the number of addresses that actually FAILED inside one window, and nothing
-        // creates an entry without a failure — so volume from invented addresses cannot grow it
-        // unless each one also costs the attacker a full argon2 verify.
-        buckets.retain(|_, (started, _)| now.duration_since(*started) < self.window);
+        let mut buckets = self
+            .buckets
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Amortised: sweeping every write would put the O(n) scan back, just one path over. Entries
+        // are bounded by the addresses that actually failed inside one window, and each of those cost
+        // an argon2 verify — so the map cannot be grown cheaply, and this keeps it from growing at
+        // all on a long-lived process.
+        if buckets.len() >= self.sweep_at {
+            buckets.retain(|_, (started, _)| now.duration_since(*started) < self.window);
+        }
         let e = buckets.entry(key.to_string()).or_insert((now, 0));
         if now.duration_since(e.0) >= self.window {
             *e = (now, 0);
@@ -173,6 +187,7 @@ mod guessing_tests {
         Guessing {
             max_failures: max,
             window: Duration::from_millis(window_ms),
+            sweep_at: 4,
             buckets: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
@@ -225,6 +240,35 @@ mod guessing_tests {
             gg.record_failure(&format!("invented-{i}"));
         }
         assert!(gg.check("a-real-person").is_ok(), "a first-time caller is unaffected by volume");
+    }
+
+    #[test]
+    fn expired_entries_are_swept_rather_than_accumulating() {
+        // `check` no longer sweeps — that work moved to the write path, which an attacker cannot
+        // reach without paying for an argon2 verify each time. The sweep still has to happen.
+        let gg = g(10, 30);
+        for i in 0..8 {
+            gg.record_failure(&format!("k{i}"));
+        }
+        assert!(gg.buckets.lock().unwrap().len() >= 4, "entries exist while the window is open");
+        std::thread::sleep(Duration::from_millis(45));
+        for i in 0..8 {
+            gg.record_failure(&format!("fresh{i}"));
+        }
+        let live = gg.buckets.lock().unwrap().len();
+        assert!(live <= 8, "the closed window's entries were dropped, not accumulated: {live}");
+    }
+
+    #[test]
+    fn a_closed_window_stops_refusing_even_before_the_sweep() {
+        // `check` reads expiry lazily now, so an entry left behind by the amortised sweep must not
+        // keep refusing its owner.
+        let gg = g(1, 30);
+        gg.record_failure("k");
+        assert!(gg.check("k").is_err());
+        std::thread::sleep(Duration::from_millis(45));
+        assert_eq!(gg.buckets.lock().unwrap().len(), 1, "the stale entry is still in the map");
+        assert!(gg.check("k").is_ok(), "and it must no longer refuse");
     }
 
     #[test]
@@ -1044,7 +1088,10 @@ async fn register_route(
     }
     let keys = lookup_keys(&s, &req.email);
     let email_hash = keys[0].clone();
-    refuse_if_guessing(&s, &email_hash)?;
+    // Deliberately NOT behind the guessing guard. There is no password to guess here, and sharing a
+    // key space with login meant ten failed logins against an address DENIED REGISTRATION of that
+    // address for the window — with no way for its owner to clear it, since register neither records
+    // nor forgets. Its argon2 is bounded by the same semaphore as login's, so the cost is covered.
     // A row stored under an OLDER key form would not collide with the unique index on the current
     // one, so without this the same person could end up with two accounts and the older of them —
     // holding all their history — unreachable.
@@ -1083,39 +1130,55 @@ async fn login_route(
 ) -> Result<Json<AuthResponse>, ApiError> {
     let keys = lookup_keys(&s, &req.email);
     let email_hash = keys[0].clone();
-    refuse_if_guessing(&s, &email_hash)?;
 
-    // ONE query for every key form, not one query per form. Looking the current key up and only then
-    // falling back made a hit measurably faster than a miss, which is an enumeration oracle — and
-    // this route goes out of its way to avoid exactly that (see the dummy verify below). `ANY` keeps
-    // every path at a single round trip, and the returned key says which era the row was stored in.
+    // ONE query for every key form. Looking the current key up and only then falling back made a hit
+    // measurably faster than a miss, which is an enumeration oracle — and this route goes out of its
+    // way to avoid exactly that (see the dummy verify below). The ordering is explicit rather than
+    // left to the index: `= ANY` walks the btree in ITS order, not the array's, so a row from a
+    // previous pepper era could win over the current one and send a returning user into whichever of
+    // two split accounts the digests happened to favour.
     let found = db::find_account_by_any_email_hash(&s.pool, &keys).await.map_err(db_err)?;
 
     let unauthorized = || ApiError::new(StatusCode::UNAUTHORIZED, "invalid credentials");
     match found {
         Some((account_id, password_hash, stored_hash)) => {
+            // VERIFY FIRST, refuse second. The other order looks cheaper and is wrong: the guard is
+            // consulted before the password can be demonstrated, so once an attacker has filled the
+            // bucket the owner's CORRECT password is refused too — they never reach the verify that
+            // would clear it. That is a targeted lockout wearing a brute-force control's name, and it
+            // is what the previous version shipped. Running the hash for a caller who is over the
+            // limit costs one permit, which is exactly the cost the semaphore exists to bound.
             let pw = req.password.clone();
             let ok = hash_bounded(&s, move || auth::verify_password(&pw, &password_hash)).await?;
             if !ok {
                 if let Some(g) = &s.auth_guessing {
                     g.record_failure(&email_hash);
                 }
+                refuse_if_guessing(&s, &email_hash)?;
                 return Err(unauthorized());
             }
-            // A correct password clears the record: someone who fumbled twice and then got it right
-            // is not carrying a strike, and an attacker cannot lock out a person who knows their own
-            // password — which the count-everything version allowed.
+            // A correct password always succeeds, however full the bucket is, and empties it.
             if let Some(g) = &s.auth_guessing {
                 g.forget(&email_hash);
             }
             // Upgrade only now: rewriting the key for anyone who merely GUESSES an address would let
             // an unauthenticated caller migrate — and so enumerate — rows they cannot log into.
             if stored_hash != email_hash {
-                // Cosmetic, whichever era the row came from. A transient database error here must
-                // not turn correct credentials into a 500 — the person authenticated; the row can be
-                // migrated on their next login instead.
-                if let Err(e) = db::update_email_hash(&s.pool, account_id, &email_hash).await {
-                    eprintln!("email hash migration failed for an authenticated account: {e}");
+                match db::update_email_hash(&s.pool, account_id, &email_hash).await {
+                    Ok(()) => {}
+                    // A transient failure is cosmetic: the person authenticated, and the row migrates
+                    // on their next login. A UNIQUE violation is not transient — it means a second
+                    // account already holds this address under the current key, which is the split
+                    // this route's duplicate checks exist to prevent. Swallowing both identically
+                    // would hide permanent corruption behind a line that repeats forever.
+                    Err(e) if db::is_unique_violation(&e) => {
+                        eprintln!(
+                            "DATA INTEGRITY: account {account_id} could not be migrated to the \
+                             current email key because another account already holds it. Two accounts \
+                             share one address; the older one is unreachable. Needs manual repair."
+                        );
+                    }
+                    Err(e) => eprintln!("email hash migration failed for an authenticated account: {e}"),
                 }
             }
             let token = auth::issue_token(account_id, &s.jwt_secret, s.token_ttl_secs)
@@ -1131,6 +1194,7 @@ async fn login_route(
             if let Some(g) = &s.auth_guessing {
                 g.record_failure(&email_hash);
             }
+            refuse_if_guessing(&s, &email_hash)?;
             Err(unauthorized())
         }
     }

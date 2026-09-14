@@ -73,6 +73,10 @@ def main():
     # The service fails closed without a JWT secret (REVIEW-2026-09-09 S5) — the probe supplies one.
     env = dict(os.environ)
     env.setdefault("JWT_SECRET", "witness-probe-secret")
+    # The service also fails closed without an email pepper, and needs >= 32 bytes. Without this the
+    # probe starts a service that exits 1 and then reports "never became healthy" — which is what the
+    # setdefault above exists to prevent, one variable later.
+    env.setdefault("EMAIL_PEPPER", "witness-probe-pepper-0123456789abcdef")
     srv = subprocess.Popen(["./target/debug/clock-of-life-service"],
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
     try:

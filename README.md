@@ -32,12 +32,16 @@ scenarios and reconciles its reference tables (features, questions, active model
 - Auth protection on `/api/auth/register` and `/api/auth/login`, in two parts because they guard
   different things:
   - **guessing** — 10 *failed* attempts per address per minute, answered `429` with `Retry-After`.
-    Only failures count and a correct password clears the record, so nobody can be locked out of an
-    account whose password they know.
+    The password is verified BEFORE the counter is consulted, so a correct password always succeeds
+    however full the bucket is, and clears it. That ordering is the whole control: checking first
+    looks cheaper and turns the guard into a targeted lockout, because the owner never reaches the
+    verify that would clear their own record. Registration is not behind this guard at all — there is
+    no password to guess, and sharing a key space with login let failed logins block signups.
   - **cost** — argon2id runs under a semaphore sized to the machine's cores, on blocking threads.
-    Callers queue; nobody is refused. A counter was tried here first and was a mistake: a global
-    request cap is a shared-fate control, so filling it denied every user at once and cost the
-    attacker nothing to hold.
+    Callers queue rather than being refused; under sustained load that is added *latency*, not
+    rejection. A counter was tried here first and was a mistake: a global request cap is a
+    shared-fate control, so filling it denied every user at once and cost the attacker nothing to
+    hold.
 
 ```bash
 createdb clock_of_life          # once

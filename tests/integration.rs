@@ -1601,22 +1601,52 @@ fn a_stranger_guessing_cannot_lock_the_owner_out() {
     let password = "password123";
     call(&s, post("/api/auth/register", json!({"email": email, "password": password}))).await;
 
-    // Nine wrong guesses — one short of the limit.
-    for _ in 0..9 {
+    // TWELVE wrong guesses — past the limit, which is the whole point. This test previously sent
+    // nine, one short, so it asserted nothing about the property its name claims.
+    // Past the tenth, a wrong password is still refused — just with 429 instead of 401. Both are
+    // refusals; the distinction the next assertion cares about is that a RIGHT password is not.
+    for i in 0..12 {
         let r = call(&s, post("/api/auth/login", json!({"email": email, "password": "wrong"}))).await;
-        assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+        assert!(matches!(r.status(), StatusCode::UNAUTHORIZED | StatusCode::TOO_MANY_REQUESTS),
+                "guess {i} should be refused, got {}", r.status());
     }
-    // The owner gets in, and that clears the record.
+    // The owner gets in ANYWAY — the bucket is full and it does not matter, because the password is
+    // verified before the guard is consulted. This is the property; nine guesses never tested it.
     let ok = call(&s, post("/api/auth/login", json!({"email": email, "password": password}))).await;
-    assert_eq!(ok.status(), StatusCode::OK, "the owner's correct password is not refused");
+    assert_eq!(ok.status(), StatusCode::OK, "a full bucket must not refuse the owner's own password");
 
-    // So there is a full allowance again rather than one strike left.
+    // And the success emptied the bucket, so there is a full allowance again: nine plain 401s, with
+    // the tenth being the one that reaches the limit and says so.
     for i in 0..9 {
         let r = call(&s, post("/api/auth/login", json!({"email": email, "password": "wrong"}))).await;
-        assert_eq!(r.status(), StatusCode::UNAUTHORIZED, "attempt {i} after a success");
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED,
+                   "attempt {i} after a success: the allowance was cleared, so this is a plain 401");
     }
+    let tenth = call(&s, post("/api/auth/login", json!({"email": email, "password": "wrong"}))).await;
+    assert_eq!(tenth.status(), StatusCode::TOO_MANY_REQUESTS, "the tenth failure reaches the limit");
+
+    // And even then, the owner's own password still works. That is the whole property.
     let still_ok = call(&s, post("/api/auth/login", json!({"email": email, "password": password}))).await;
     assert_eq!(still_ok.status(), StatusCode::OK);
+    });
+}
+
+/// Failed logins against an address must not block REGISTERING it.
+///
+/// Register shares no key space with login's guard, and consults it not at all. When it did, ten
+/// failed logins against an address with no account denied its owner the ability to create one, with
+/// nothing they could do to clear it.
+#[test]
+fn guessing_an_address_does_not_block_signing_up_with_it() {
+    RT.block_on(async {
+    let s = state().await;
+    let email = unique_email();
+    for _ in 0..12 {
+        let r = call(&s, post("/api/auth/login", json!({"email": email, "password": "wrong"}))).await;
+        assert!(matches!(r.status(), StatusCode::UNAUTHORIZED | StatusCode::TOO_MANY_REQUESTS));
+    }
+    let reg = call(&s, post("/api/auth/register", json!({"email": email, "password": "password123"}))).await;
+    assert_eq!(reg.status(), StatusCode::OK, "its owner can still create the account");
     });
 }
 
@@ -1628,10 +1658,20 @@ fn flooding_with_unknown_addresses_does_not_deny_real_users() {
     let victim = unique_email();
     call(&s, post("/api/auth/register", json!({"email": victim, "password": "password123"}))).await;
 
-    for i in 0..40 {
+    // THIRTY, and this test does not claim to prove the property on its own.
+    //
+    // The version this guards against had a GLOBAL cap of 600/minute, so no flood smaller than that
+    // discriminates against it — and a 620-request flood here means 620 argon2 verifies queued behind
+    // a semaphore sized to the machine's cores, which serialises the whole suite for minutes. The
+    // property ("volume under unknown addresses refuses nobody") is pinned in `guessing_tests`, where
+    // 5,000 failures cost nothing because no hashing is involved. What THIS test checks is that the
+    // route is wired to that guard at all: unknown addresses answer 401 rather than 429, and a real
+    // user still gets in alongside them.
+    for i in 0..30 {
         let r = call(&s, post("/api/auth/login",
                     json!({"email": format!("invented-{i}@example.com"), "password": "x"}))).await;
-        assert_eq!(r.status(), StatusCode::UNAUTHORIZED, "an unknown address is a 401, not a 429");
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED,
+                   "request {i}: an unknown address is a 401, never a 429 for everyone else");
     }
 
     let ok = call(&s, post("/api/auth/login", json!({"email": victim, "password": "password123"}))).await;
