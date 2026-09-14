@@ -287,6 +287,26 @@ def main():
         check("interview: the home location reads back on the profile",
               bool(s == 200 and profile.get("home_location_id")), str(s))
 
+        # Clicking calculate again without editing anything is not a new calculation. Six identical
+        # rows reached My Progress under a sentence promising the history shows how the estimate moves
+        # as the ANSWERS change; the web guard against it was a React ref that died on reload.
+        same = {"country": "RO", "age": 41, "sex": "F", "smoke": 0, "pa_min": 900, "sleep": 7,
+                "waist": 82, "income": 3.0}
+        calc_ids = set()
+        for _ in range(3):
+            _, e = post("/api/estimate", same, token)
+            calc_ids.add(e.get("calculation_id"))
+        s_hist, hist = get_auth("/api/calculations", token)
+        rows = [r for r in hist if isinstance(r, dict)] if s_hist == 200 else []
+        check("history: three clicks on unchanged answers are one calculation",
+              len(calc_ids) == 1 and None not in calc_ids, f"{len(calc_ids)} ids")
+        before = len(rows)
+        _, e2 = post("/api/estimate", {**same, "waist": 104}, token)
+        s_hist, hist = get_auth("/api/calculations", token)
+        rows2 = [r for r in hist if isinstance(r, dict)] if s_hist == 200 else []
+        check("history: changing an answer still appends a snapshot",
+              len(rows2) == before + 1, f"{before} -> {len(rows2)}")
+
         old = {"country": "RO", "age": 100, "sex": "M", "smoke": 0, "pa_min": 600,
                "sleep": 7, "waist": 90}
         s, hundred = post("/api/estimate", old, None)

@@ -253,6 +253,135 @@ fn estimate_persists_and_history_reads_back() {
     });
 }
 
+/// Re-scoring answers nobody changed is not a new calculation.
+///
+/// Reported by the owner from the live app: six identical rows on My Progress, same value, same day,
+/// "±0.0 yr since first" — under a sentence promising history shows how the estimate moves AS THE
+/// ANSWERS CHANGE. Nothing had changed six times over. The web client already tried to prevent this,
+/// but its guard was a React ref, so it died on every page reload.
+#[test]
+fn identical_answers_do_not_append_history() {
+    RT.block_on(async {
+    let s = state().await;
+    let token = register_token(&s).await;
+
+    // Three clicks, same answers.
+    let mut ids = std::collections::HashSet::new();
+    for _ in 0..3 {
+        let r = call(&s, post_auth("/api/estimate", valid_profile(), &token)).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let e = body_json(r).await;
+        ids.insert(e["calculation_id"].as_str().unwrap().to_string());
+    }
+    assert_eq!(ids.len(), 1, "the same answers must keep pointing at one calculation: {ids:?}");
+
+    let rows = body_json(call(&s, get_auth("/api/calculations", &token)).await).await;
+    assert_eq!(rows.as_array().unwrap().len(), 1, "one row, not three");
+
+    // Changing an answer appends, as it always did.
+    let mut changed = valid_profile();
+    changed["waist"] = json!(112);
+    let r = call(&s, post_auth("/api/estimate", changed.clone(), &token)).await;
+    assert_eq!(r.status(), StatusCode::OK);
+    let rows = body_json(call(&s, get_auth("/api/calculations", &token)).await).await;
+    assert_eq!(rows.as_array().unwrap().len(), 2, "a changed answer is a new snapshot");
+
+    // A -> B -> A is a real sequence: the reader changed something and changed it back. Only
+    // CONSECUTIVE repeats collapse, so this appends rather than pointing back at the first row.
+    let r = call(&s, post_auth("/api/estimate", valid_profile(), &token)).await;
+    assert_eq!(r.status(), StatusCode::OK);
+    let rows = body_json(call(&s, get_auth("/api/calculations", &token)).await).await;
+    let rows = rows.as_array().unwrap();
+    assert_eq!(rows.len(), 3, "returning to earlier answers is a third snapshot, not a repeat");
+    assert_eq!(rows[0]["input_hash"], rows[2]["input_hash"], "and it is the same input as the first");
+    assert_ne!(rows[0]["id"], rows[2]["id"],
+               "a NEW row, not a pointer back at the first — that is what makes it a third snapshot");
+    });
+}
+
+/// The race the first version of this fix claimed was impossible.
+///
+/// The original comment said a single statement meant two clicks could not both insert. That is
+/// atomicity, not serialisability: under READ COMMITTED both executions read a history without the
+/// other's uncommitted row. Measured against PostgreSQL directly, it duplicated in 73 of 120 trials.
+/// This fires the same request concurrently and asserts the history holds exactly one row.
+#[test]
+fn racing_clicks_do_not_both_append() {
+    RT.block_on(async {
+    let s = state().await;
+    let token = register_token(&s).await;
+
+    // Real tasks on the multi-thread runtime, not just interleaved futures on one — the race needs
+    // two connections in flight at the same instant, which a single task cannot produce.
+    let mut handles = Vec::new();
+    for _ in 0..8 {
+        let state = s.clone();
+        let tok = token.clone();
+        handles.push(tokio::spawn(async move {
+            let r = call(&state, post_auth("/api/estimate", valid_profile(), &tok)).await;
+            let status = r.status();
+            let id = body_json(r).await["calculation_id"].as_str().unwrap().to_string();
+            (status, id)
+        }));
+    }
+    let mut ids = std::collections::HashSet::new();
+    for h in handles {
+        let (status, id) = h.await.expect("task did not panic");
+        assert_eq!(status, StatusCode::OK);
+        ids.insert(id);
+    }
+    assert_eq!(ids.len(), 1, "eight simultaneous identical clicks are one calculation: {ids:?}");
+
+    let rows = body_json(call(&s, get_auth("/api/calculations", &token)).await).await;
+    assert_eq!(rows.as_array().unwrap().len(), 1, "and leave exactly one row");
+    });
+}
+
+/// A re-score that produces a DIFFERENT number must append, even for identical answers.
+///
+/// `model_version_id` is derived from `manifest.version`, but the estimate is computed in
+/// `scoring.rs`, which that version does not cover. Matching on answers alone would collapse a
+/// changed result onto the old row: the response would carry the new number and the stored row would
+/// keep the old one forever, in an append-only table.
+#[test]
+fn a_changed_result_appends_even_when_the_answers_did_not_change() {
+    RT.block_on(async {
+    let s = state().await;
+    let token = register_token(&s).await;
+    let profile = valid_profile();
+
+    let first = body_json(call(&s, post_auth("/api/estimate", profile.clone(), &token)).await).await;
+    let years = first["estimate_years"].as_f64().unwrap();
+
+    // Simulate the re-score: same answers and model version, a different stored result. Written
+    // directly, because making the real scorer disagree with itself needs a bundle swap. This is the
+    // one UPDATE in the suite against a table migrations/0001_init.sql marks APPEND-ONLY (a comment,
+    // not a constraint) — it stands in for a scoring change, and is not a licence to write one.
+    let calc_id = first["calculation_id"].as_str().unwrap();
+    sqlx::query("UPDATE calculation SET estimate_years = estimate_years + 2 WHERE id = $1::uuid")
+        .bind(calc_id)
+        .execute(&s.pool)
+        .await
+        .expect("nudge the stored result");
+
+    let again = call(&s, post_auth("/api/estimate", profile, &token)).await;
+    assert_eq!(again.status(), StatusCode::OK);
+    let again = body_json(again).await;
+    assert_ne!(again["calculation_id"].as_str().unwrap(), calc_id,
+               "the stored number no longer matches, so this is a new snapshot");
+    let rows = body_json(call(&s, get_auth("/api/calculations", &token)).await).await;
+    let rows = rows.as_array().unwrap();
+    assert_eq!(rows.len(), 2, "history keeps both");
+    // Read the STORED number back, not the previous response. Comparing the two responses would be a
+    // tautology — both carry a freshly computed estimate from a deterministic scorer, so it passes
+    // with or without the fix and never touches the row the assertion is about.
+    assert_eq!(rows[0]["estimate_years"].as_f64().unwrap(), years,
+               "the newest row holds the number that was actually served");
+    assert_ne!(rows[1]["estimate_years"].as_f64().unwrap(), years,
+               "and the nudged older row is still there, still different");
+    });
+}
+
 /// The benchmark contradiction: a reader below average risk must never be told she has fewer years
 /// left than the average person. The served average is rr = 1.0 over the same life table, so the two
 /// figures on the Life Clock cannot point in opposite directions.

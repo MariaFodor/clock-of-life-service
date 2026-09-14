@@ -93,7 +93,33 @@ pub struct CalcRow {
     pub created_at: DateTime<Utc>,
 }
 
-/// Append a calculation snapshot (the `calculation` table is append-only). Returns the new id.
+/// Append a calculation snapshot, UNLESS it repeats the one already at the top of this account's
+/// history. Returns the id of the row that now represents this answer — new or existing.
+///
+/// The table stays append-only; what changes is that re-scoring answers nobody edited stops being an
+/// append. `input_hash` has been computed and stored on every row since the table existed and was
+/// never read: this is what it was for.
+///
+/// Why the NEWEST row rather than any row. Answering A, then B, then A again is a real sequence — the
+/// reader changed something and changed it back, and the history should show that. Answering A three
+/// times is one answer clicked three times. Only consecutive repeats collapse.
+///
+/// The model version is part of the match, so the same answers re-scored after a bundle upgrade DO
+/// append. That is a different answer to the same question, which is exactly what a history is for.
+///
+/// SERIALISED PER ACCOUNT, because one statement was not enough. This first shipped as a bare CTE,
+/// with a comment claiming that being a single statement stopped two racing clicks from both
+/// inserting. That conflates atomicity with serialisability. Under READ COMMITTED each statement
+/// takes its own snapshot at statement start, `newest` is an ordinary read that takes no locks, so
+/// both executions see a history without the other's uncommitted row, both find no repeat, and both
+/// insert. Reproduced on PostgreSQL 18.6 with this exact CTE: 73 duplicates in 120 trials at
+/// simultaneous fire, and up to three identical rows with eight clients. The failure is this
+/// function's own title scenario — a double-click on Calculate.
+///
+/// `pg_advisory_xact_lock` as its OWN statement, before the CTE, inside an explicit transaction:
+/// 0 duplicates in 120 trials. It must be a separate statement — folding the same lock into the CTE
+/// as a leading term does NOT work (64/120), because the statement's snapshot is taken before the
+/// lock is acquired, so `newest` still reads pre-lock state.
 #[allow(clippy::too_many_arguments)]
 pub async fn insert_calculation(
     pool: &PgPool,
@@ -108,12 +134,54 @@ pub async fn insert_calculation(
     relative_risk: f64,
     attributions: &Value,
 ) -> Result<Uuid, sqlx::Error> {
-    sqlx::query_scalar::<_, Uuid>(
-        "INSERT INTO calculation
-           (account_id, model_version_id, input_hash, inputs,
-            estimate_years, interval_low, interval_high, reaches_age, relative_risk, attributions)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-         RETURNING id",
+    let mut tx = pool.begin().await?;
+    // Serialise the read-then-maybe-insert for THIS account only. Different accounts contend only on
+    // a 64-bit hash collision (~2^-64), where the cost is a brief spurious wait and never a wrong
+    // answer, because the guarded statement is itself scoped `WHERE account_id = $1`. Different
+    // accounts effectively never contend;
+    // the shared anonymous account is the one hot key, and it is also where the race was continuous.
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))")
+        .bind(account_id.to_string())
+        .execute(&mut *tx)
+        .await?;
+
+    let id = sqlx::query_scalar::<_, Uuid>(
+        "WITH newest AS (
+             SELECT id, input_hash, model_version_id, estimate_years, relative_risk
+             FROM calculation
+             WHERE account_id = $1
+             ORDER BY created_at DESC, id DESC
+             LIMIT 1
+         ),
+         repeat AS (
+             -- The ANSWERS matching is not enough: `model_version_id` comes from `manifest.version`,
+             -- while the number itself is computed in `scoring.rs`, which that version does not cover.
+             -- Without the two value columns, a scoring fix that moves the same profile from 42.0 to
+             -- 44.0 would collapse onto the old row: the response would say 44.0 and the stored row
+             -- would keep 42.0 forever, in an append-only table. That is My Progress contradicting
+             -- the Life Clock, which is the defect the previous commit in this stack exists to end.
+             SELECT id FROM newest
+             WHERE input_hash = $3 AND model_version_id = $2
+               AND estimate_years = $5::numeric AND relative_risk = $9::numeric
+         ),
+         inserted AS (
+             INSERT INTO calculation
+               (account_id, model_version_id, input_hash, inputs,
+                estimate_years, interval_low, interval_high, reaches_age, relative_risk,
+                attributions, created_at)
+             -- clock_timestamp(), not the column's now() default. now() is transaction_timestamp(),
+             -- stamped at BEGIN — which is now BEFORE the advisory-lock wait. A transaction that
+             -- began first but acquired the lock last would stamp its row EARLIER than one already
+             -- inserted, and since `newest` orders by created_at, the top of history would become
+             -- arrival order rather than insert order. Sub-millisecond window, but it exists only
+             -- because this statement grew a lock wait, so it is this statement's to close.
+             SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, clock_timestamp()
+             WHERE NOT EXISTS (SELECT 1 FROM repeat)
+             RETURNING id
+         )
+         SELECT id FROM inserted
+         UNION ALL
+         SELECT id FROM repeat",
     )
     .bind(account_id)
     .bind(model_version_id)
@@ -125,8 +193,10 @@ pub async fn insert_calculation(
     .bind(reaches_age)
     .bind(relative_risk)
     .bind(attributions)
-    .fetch_one(pool)
-    .await
+    .fetch_one(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(id)
 }
 
 /// Most-recent-first calculation history for one account (progress timeline).
