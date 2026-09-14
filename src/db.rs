@@ -93,7 +93,22 @@ pub struct CalcRow {
     pub created_at: DateTime<Utc>,
 }
 
-/// Append a calculation snapshot (the `calculation` table is append-only). Returns the new id.
+/// Append a calculation snapshot, UNLESS it repeats the one already at the top of this account's
+/// history. Returns the id of the row that now represents this answer — new or existing.
+///
+/// The table stays append-only; what changes is that re-scoring answers nobody edited stops being an
+/// append. `input_hash` has been computed and stored on every row since the table existed and was
+/// never read: this is what it was for.
+///
+/// Why the NEWEST row rather than any row. Answering A, then B, then A again is a real sequence — the
+/// reader changed something and changed it back, and the history should show that. Answering A three
+/// times is one answer clicked three times. Only consecutive repeats collapse.
+///
+/// The model version is part of the match, so the same answers re-scored after a bundle upgrade DO
+/// append. That is a different answer to the same question, which is exactly what a history is for.
+///
+/// One statement rather than a read-then-write, so two clicks racing cannot both see an empty top of
+/// history and both insert.
 #[allow(clippy::too_many_arguments)]
 pub async fn insert_calculation(
     pool: &PgPool,
@@ -109,11 +124,27 @@ pub async fn insert_calculation(
     attributions: &Value,
 ) -> Result<Uuid, sqlx::Error> {
     sqlx::query_scalar::<_, Uuid>(
-        "INSERT INTO calculation
-           (account_id, model_version_id, input_hash, inputs,
-            estimate_years, interval_low, interval_high, reaches_age, relative_risk, attributions)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-         RETURNING id",
+        "WITH newest AS (
+             SELECT id, input_hash, model_version_id
+             FROM calculation
+             WHERE account_id = $1
+             ORDER BY created_at DESC, id DESC
+             LIMIT 1
+         ),
+         repeat AS (
+             SELECT id FROM newest WHERE input_hash = $3 AND model_version_id = $2
+         ),
+         inserted AS (
+             INSERT INTO calculation
+               (account_id, model_version_id, input_hash, inputs,
+                estimate_years, interval_low, interval_high, reaches_age, relative_risk, attributions)
+             SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10
+             WHERE NOT EXISTS (SELECT 1 FROM repeat)
+             RETURNING id
+         )
+         SELECT id FROM inserted
+         UNION ALL
+         SELECT id FROM repeat",
     )
     .bind(account_id)
     .bind(model_version_id)

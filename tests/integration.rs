@@ -253,6 +253,50 @@ fn estimate_persists_and_history_reads_back() {
     });
 }
 
+/// Re-scoring answers nobody changed is not a new calculation.
+///
+/// Reported by the owner from the live app: six identical rows on My Progress, same value, same day,
+/// "±0.0 yr since first" — under a sentence promising history shows how the estimate moves AS THE
+/// ANSWERS CHANGE. Nothing had changed six times over. The web client already tried to prevent this,
+/// but its guard was a React ref, so it died on every page reload.
+#[test]
+fn identical_answers_do_not_append_history() {
+    RT.block_on(async {
+    let s = state().await;
+    let token = register_token(&s).await;
+
+    // Three clicks, same answers.
+    let mut ids = std::collections::HashSet::new();
+    for _ in 0..3 {
+        let r = call(&s, post_auth("/api/estimate", valid_profile(), &token)).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let e = body_json(r).await;
+        ids.insert(e["calculation_id"].as_str().unwrap().to_string());
+    }
+    assert_eq!(ids.len(), 1, "the same answers must keep pointing at one calculation: {ids:?}");
+
+    let rows = body_json(call(&s, get_auth("/api/calculations", &token)).await).await;
+    assert_eq!(rows.as_array().unwrap().len(), 1, "one row, not three");
+
+    // Changing an answer appends, as it always did.
+    let mut changed = valid_profile();
+    changed["waist"] = json!(112);
+    let r = call(&s, post_auth("/api/estimate", changed.clone(), &token)).await;
+    assert_eq!(r.status(), StatusCode::OK);
+    let rows = body_json(call(&s, get_auth("/api/calculations", &token)).await).await;
+    assert_eq!(rows.as_array().unwrap().len(), 2, "a changed answer is a new snapshot");
+
+    // A -> B -> A is a real sequence: the reader changed something and changed it back. Only
+    // CONSECUTIVE repeats collapse, so this appends rather than pointing back at the first row.
+    let r = call(&s, post_auth("/api/estimate", valid_profile(), &token)).await;
+    assert_eq!(r.status(), StatusCode::OK);
+    let rows = body_json(call(&s, get_auth("/api/calculations", &token)).await).await;
+    let rows = rows.as_array().unwrap();
+    assert_eq!(rows.len(), 3, "returning to earlier answers is a third snapshot, not a repeat");
+    assert_eq!(rows[0]["input_hash"], rows[2]["input_hash"], "and it is the same input as the first");
+    });
+}
+
 /// The benchmark contradiction: a reader below average risk must never be told she has fewer years
 /// left than the average person. The served average is rr = 1.0 over the same life table, so the two
 /// figures on the Life Clock cannot point in opposite directions.
