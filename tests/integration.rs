@@ -329,17 +329,23 @@ fn duplicate_history_rows_are_collapsed_and_scenarios_survive() {
         .fetch_one(&s.pool).await.unwrap();
 
     // A -> A -> A -> B -> A, written directly, which is what the old service produced per click.
+    // The fourth "A" carries a DIFFERENT attributions snapshot: same answers, same numbers, richer
+    // evidence — which happens when a citation is added without the model version moving. It must
+    // survive, because deleting it would destroy the only copy of that snapshot.
     let mut ids = Vec::new();
-    for (i, (hash, years)) in [("aaa", 40.0), ("aaa", 40.0), ("aaa", 40.0), ("bbb", 38.0), ("aaa", 40.0)]
-        .iter().enumerate()
+    for (i, (hash, years, attrs)) in [
+        ("aaa", 40.0, "[]"), ("aaa", 40.0, "[]"), ("aaa", 40.0, "[]"),
+        ("bbb", 38.0, "[]"), ("aaa", 40.0, "[]"),
+        ("aaa", 40.0, r#"[{"factor":"waist"}]"#),
+    ].iter().enumerate()
     {
         let id: uuid::Uuid = sqlx::query_scalar(
             "INSERT INTO calculation (account_id, model_version_id, input_hash, inputs,
                  estimate_years, interval_low, interval_high, reaches_age, relative_risk,
                  attributions, created_at)
-             VALUES ($1,$2,$3,'{}'::jsonb,$4::numeric,1,2,80,1.0,'[]'::jsonb, now() + ($5 || ' ms')::interval)
+             VALUES ($1,$2,$3,'{}'::jsonb,$4::numeric,1,2,80,1.0,$6::jsonb, now() + ($5 || ' ms')::interval)
              RETURNING id")
-            .bind(account).bind(model).bind(hash).bind(years).bind((i * 10) as i32)
+            .bind(account).bind(model).bind(hash).bind(years).bind((i * 10) as i32).bind(attrs)
             .fetch_one(&s.pool).await.expect("fixture row");
         ids.push(id);
     }
@@ -364,11 +370,14 @@ fn duplicate_history_rows_are_collapsed_and_scenarios_survive() {
         "SELECT id, input_hash FROM calculation WHERE account_id = $1 ORDER BY created_at, id")
         .bind(account).fetch_all(&s.pool).await.unwrap();
 
-    // Three rows: the FIRST of the A-run, then B, then the return to A.
-    assert_eq!(survivors.len(), 3, "A->A->A->B->A collapses to three, not one: {survivors:?}");
+    // Four rows: the FIRST of the A-run, then B, then the return to A, then the A that carries a
+    // different evidence snapshot — which repeats the row before it on every column the live rule
+    // matches, and is kept anyway because destroying it would lose the only copy of that snapshot.
+    assert_eq!(survivors.len(), 4, "A->A->A->B->A->A' collapses to four: {survivors:?}");
     assert_eq!(survivors[0].0, ids[0], "the first of the run survives, not the last");
     assert_eq!(survivors[1].0, ids[3], "B is untouched");
     assert_eq!(survivors[2].0, ids[4], "returning to earlier answers stays its own snapshot");
+    assert_eq!(survivors[3].0, ids[5], "and a differing attributions snapshot is never destroyed");
 
     // The What-If is still there, repointed at the survivor rather than cascaded away.
     let base: Option<uuid::Uuid> = sqlx::query_scalar(
