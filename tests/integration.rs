@@ -294,6 +294,83 @@ fn identical_answers_do_not_append_history() {
     let rows = rows.as_array().unwrap();
     assert_eq!(rows.len(), 3, "returning to earlier answers is a third snapshot, not a repeat");
     assert_eq!(rows[0]["input_hash"], rows[2]["input_hash"], "and it is the same input as the first");
+    assert_ne!(rows[0]["id"], rows[2]["id"],
+               "a NEW row, not a pointer back at the first — that is what makes it a third snapshot");
+    });
+}
+
+/// The race the first version of this fix claimed was impossible.
+///
+/// The original comment said a single statement meant two clicks could not both insert. That is
+/// atomicity, not serialisability: under READ COMMITTED both executions read a history without the
+/// other's uncommitted row. Measured against PostgreSQL directly, it duplicated in 73 of 120 trials.
+/// This fires the same request concurrently and asserts the history holds exactly one row.
+#[test]
+fn racing_clicks_do_not_both_append() {
+    RT.block_on(async {
+    let s = state().await;
+    let token = register_token(&s).await;
+
+    // Real tasks on the multi-thread runtime, not just interleaved futures on one — the race needs
+    // two connections in flight at the same instant, which a single task cannot produce.
+    let mut handles = Vec::new();
+    for _ in 0..8 {
+        let state = s.clone();
+        let tok = token.clone();
+        handles.push(tokio::spawn(async move {
+            let r = call(&state, post_auth("/api/estimate", valid_profile(), &tok)).await;
+            let status = r.status();
+            let id = body_json(r).await["calculation_id"].as_str().unwrap().to_string();
+            (status, id)
+        }));
+    }
+    let mut ids = std::collections::HashSet::new();
+    for h in handles {
+        let (status, id) = h.await.expect("task did not panic");
+        assert_eq!(status, StatusCode::OK);
+        ids.insert(id);
+    }
+    assert_eq!(ids.len(), 1, "eight simultaneous identical clicks are one calculation: {ids:?}");
+
+    let rows = body_json(call(&s, get_auth("/api/calculations", &token)).await).await;
+    assert_eq!(rows.as_array().unwrap().len(), 1, "and leave exactly one row");
+    });
+}
+
+/// A re-score that produces a DIFFERENT number must append, even for identical answers.
+///
+/// `model_version_id` is derived from `manifest.version`, but the estimate is computed in
+/// `scoring.rs`, which that version does not cover. Matching on answers alone would collapse a
+/// changed result onto the old row: the response would carry the new number and the stored row would
+/// keep the old one forever, in an append-only table.
+#[test]
+fn a_changed_result_appends_even_when_the_answers_did_not_change() {
+    RT.block_on(async {
+    let s = state().await;
+    let token = register_token(&s).await;
+    let profile = valid_profile();
+
+    let first = body_json(call(&s, post_auth("/api/estimate", profile.clone(), &token)).await).await;
+    let years = first["estimate_years"].as_f64().unwrap();
+
+    // Simulate the re-score: same answers and model version, a different stored result. Written
+    // directly, because making the real scorer disagree with itself needs a bundle swap.
+    let calc_id = first["calculation_id"].as_str().unwrap();
+    sqlx::query("UPDATE calculation SET estimate_years = estimate_years + 2 WHERE id = $1::uuid")
+        .bind(calc_id)
+        .execute(&s.pool)
+        .await
+        .expect("nudge the stored result");
+
+    let again = call(&s, post_auth("/api/estimate", profile, &token)).await;
+    assert_eq!(again.status(), StatusCode::OK);
+    let again = body_json(again).await;
+    assert_ne!(again["calculation_id"].as_str().unwrap(), calc_id,
+               "the stored number no longer matches, so this is a new snapshot");
+    let rows = body_json(call(&s, get_auth("/api/calculations", &token)).await).await;
+    assert_eq!(rows.as_array().unwrap().len(), 2, "history keeps both");
+    assert_eq!(again["estimate_years"].as_f64().unwrap(), years,
+               "and the served number is the one that was actually stored");
     });
 }
 

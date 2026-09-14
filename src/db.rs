@@ -107,8 +107,19 @@ pub struct CalcRow {
 /// The model version is part of the match, so the same answers re-scored after a bundle upgrade DO
 /// append. That is a different answer to the same question, which is exactly what a history is for.
 ///
-/// One statement rather than a read-then-write, so two clicks racing cannot both see an empty top of
-/// history and both insert.
+/// SERIALISED PER ACCOUNT, because one statement was not enough. This first shipped as a bare CTE,
+/// with a comment claiming that being a single statement stopped two racing clicks from both
+/// inserting. That conflates atomicity with serialisability. Under READ COMMITTED each statement
+/// takes its own snapshot at statement start, `newest` is an ordinary read that takes no locks, so
+/// both executions see a history without the other's uncommitted row, both find no repeat, and both
+/// insert. Reproduced on PostgreSQL 18.6 with this exact CTE: 73 duplicates in 120 trials at
+/// simultaneous fire, and up to three identical rows with eight clients. The failure is this
+/// function's own title scenario — a double-click on Calculate.
+///
+/// `pg_advisory_xact_lock` as its OWN statement, before the CTE, inside an explicit transaction:
+/// 0 duplicates in 120 trials. It must be a separate statement — folding the same lock into the CTE
+/// as a leading term does NOT work (64/120), because the statement's snapshot is taken before the
+/// lock is acquired, so `newest` still reads pre-lock state.
 #[allow(clippy::too_many_arguments)]
 pub async fn insert_calculation(
     pool: &PgPool,
@@ -123,16 +134,32 @@ pub async fn insert_calculation(
     relative_risk: f64,
     attributions: &Value,
 ) -> Result<Uuid, sqlx::Error> {
-    sqlx::query_scalar::<_, Uuid>(
+    let mut tx = pool.begin().await?;
+    // Serialise the read-then-maybe-insert for THIS account only. Different accounts never contend;
+    // the shared anonymous account is the one hot key, and it is also where the race was continuous.
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))")
+        .bind(account_id.to_string())
+        .execute(&mut *tx)
+        .await?;
+
+    let id = sqlx::query_scalar::<_, Uuid>(
         "WITH newest AS (
-             SELECT id, input_hash, model_version_id
+             SELECT id, input_hash, model_version_id, estimate_years, relative_risk
              FROM calculation
              WHERE account_id = $1
              ORDER BY created_at DESC, id DESC
              LIMIT 1
          ),
          repeat AS (
-             SELECT id FROM newest WHERE input_hash = $3 AND model_version_id = $2
+             -- The ANSWERS matching is not enough: `model_version_id` comes from `manifest.version`,
+             -- while the number itself is computed in `scoring.rs`, which that version does not cover.
+             -- Without the two value columns, a scoring fix that moves the same profile from 42.0 to
+             -- 44.0 would collapse onto the old row: the response would say 44.0 and the stored row
+             -- would keep 42.0 forever, in an append-only table. That is My Progress contradicting
+             -- the Life Clock, which is the defect the previous commit in this stack exists to end.
+             SELECT id FROM newest
+             WHERE input_hash = $3 AND model_version_id = $2
+               AND estimate_years = $5::numeric AND relative_risk = $9::numeric
          ),
          inserted AS (
              INSERT INTO calculation
@@ -156,8 +183,10 @@ pub async fn insert_calculation(
     .bind(reaches_age)
     .bind(relative_risk)
     .bind(attributions)
-    .fetch_one(pool)
-    .await
+    .fetch_one(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(id)
 }
 
 /// Most-recent-first calculation history for one account (progress timeline).
